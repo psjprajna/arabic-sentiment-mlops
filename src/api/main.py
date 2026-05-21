@@ -15,7 +15,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from pydantic import BaseModel, field_validator
 
 from sentiment.adapters.arabert_lora_classifier import AraBERTLoRAAdapter
@@ -75,6 +75,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     yield
 
 
+def get_classifier(request: Request) -> SentimentClassifierPort:
+    return request.app.state.classifier
+
+
 def create_app() -> FastAPI:
     app = FastAPI(
         title="Arabic Sentiment MLOps",
@@ -88,9 +92,17 @@ def create_app() -> FastAPI:
         return {"status": "ok", "model": request.app.state.backend_name}
 
     @app.post("/predict", response_model=PredictResponse)
-    def predict(req: PredictRequest, request: Request) -> PredictResponse:
-        classifier: SentimentClassifierPort = request.app.state.classifier
-        result = classifier.predict(req.text)
+    def predict(
+        req: PredictRequest,
+        classifier: SentimentClassifierPort = Depends(get_classifier),
+    ) -> PredictResponse:
+        try:
+            result = classifier.predict(req.text)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except Exception:
+            logger.exception("inference failed")
+            raise HTTPException(status_code=500, detail="internal inference error") from None
         return PredictResponse(
             text=result.text,
             sentiment=result.sentiment.value,

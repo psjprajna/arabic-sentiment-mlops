@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from api.main import create_app
+from api.main import create_app, get_classifier
 from sentiment.domain.classifier import SentimentClassifierPort
 from sentiment.domain.models import Sentiment, SentimentResult
 
@@ -130,3 +130,69 @@ def test_lifespan_fails_fast_when_lora_model_dir_missing(
     with pytest.raises((FileNotFoundError, RuntimeError)):
         with TestClient(app):
             pass
+
+
+class _RecordingFakeClassifier(SentimentClassifierPort):
+    def __init__(self, result: SentimentResult) -> None:
+        self._result = result
+        self.calls: list[str] = []
+
+    def predict(self, text: str) -> SentimentResult:
+        self.calls.append(text)
+        return self._result
+
+
+def test_predict_uses_overridden_classifier(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SENTIMENT_BACKEND", raising=False)
+    fake = _RecordingFakeClassifier(
+        SentimentResult(text="recorded", sentiment=Sentiment.POSITIVE, confidence=0.93)
+    )
+    app = create_app()
+    app.dependency_overrides[get_classifier] = lambda: fake
+    with TestClient(app) as client:
+        response = client.post("/predict", json={"text": "الفندق ممتاز"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body == {"text": "recorded", "sentiment": "positive", "confidence": 0.93}
+    assert fake.calls == ["الفندق ممتاز"]
+
+
+class _RaisingClassifier(SentimentClassifierPort):
+    def __init__(self, exc: BaseException) -> None:
+        self._exc = exc
+
+    def predict(self, text: str) -> SentimentResult:
+        raise self._exc
+
+
+def test_predict_returns_500_when_classifier_raises_unexpected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SENTIMENT_BACKEND", raising=False)
+    user_text = "نص سري لا يجب تسريبه"
+    app = create_app()
+    app.dependency_overrides[get_classifier] = lambda: _RaisingClassifier(
+        RuntimeError("boom internal trace 0xdeadbeef")
+    )
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post("/predict", json={"text": user_text})
+    assert response.status_code == 500
+    body = response.json()
+    assert body == {"detail": "internal inference error"}
+    raw = response.text
+    for leak in ("boom", "0xdeadbeef", "Traceback", "RuntimeError", user_text):
+        assert leak not in raw
+
+
+def test_predict_returns_422_when_classifier_raises_value_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SENTIMENT_BACKEND", raising=False)
+    app = create_app()
+    app.dependency_overrides[get_classifier] = lambda: _RaisingClassifier(
+        ValueError("text must not be empty")
+    )
+    with TestClient(app) as client:
+        response = client.post("/predict", json={"text": "non-empty"})
+    assert response.status_code == 422
+    assert response.json()["detail"] == "text must not be empty"
