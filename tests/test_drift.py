@@ -1,21 +1,23 @@
-"""Tests for the domain drift module (PSI + confidence bucketing).
-
-Step 1 covers the pure-math helpers and the `DriftLevel` band classifier;
-adapter behavior is added in Step 2.
+"""Tests for the domain drift module (PSI + confidence bucketing) and the
+in-memory drift monitor adapter.
 """
 
 from __future__ import annotations
 
 import math
+import re
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
+from sentiment.adapters.in_memory_drift_monitor import InMemoryDriftMonitor
 from sentiment.domain.drift import (
     DriftLevel,
     classify_psi,
     confidence_bucket,
     population_stability_index,
 )
+from sentiment.domain.models import Sentiment
 
 _REFERENCE_SHAPES = [
     pytest.param({"positive": 0.33, "negative": 0.33, "neutral": 0.34}, id="balanced"),
@@ -94,3 +96,189 @@ def test_confidence_bucket_rejects_out_of_range(invalid: float) -> None:
 )
 def test_classify_psi_bands(psi: float, expected: DriftLevel) -> None:
     assert classify_psi(psi) == expected
+
+
+# ---------------------------------------------------------------------------
+# Adapter behavior
+# ---------------------------------------------------------------------------
+
+
+_CLASS_REF: dict[Sentiment, float] = {
+    Sentiment.POSITIVE: 0.60,
+    Sentiment.NEGATIVE: 0.20,
+    Sentiment.NEUTRAL: 0.20,
+}
+_BUCKET_REF: dict[str, float] = {"low": 0.10, "medium": 0.25, "high": 0.65}
+
+
+def _make_monitor(
+    *,
+    predicted_class_reference: dict[Sentiment, float] | None = None,
+    confidence_bucket_reference: dict[str, float] | None = None,
+    buffer_size: int = 100,
+    minimum_count: int = 10,
+) -> InMemoryDriftMonitor:
+    if predicted_class_reference is None and confidence_bucket_reference is None:
+        # Default both populated unless a test wants to ablate one.
+        predicted_class_reference = dict(_CLASS_REF)
+        confidence_bucket_reference = dict(_BUCKET_REF)
+    return InMemoryDriftMonitor(
+        backend_name="test-backend-v1",
+        predicted_class_reference=predicted_class_reference,
+        confidence_bucket_reference=confidence_bucket_reference,
+        buffer_size=buffer_size,
+        minimum_count=minimum_count,
+    )
+
+
+@pytest.mark.parametrize(
+    "buffer_size,minimum_count",
+    [(0, 1), (10, 0), (5, 6)],
+    ids=["buffer-zero", "min-zero", "min-exceeds-buffer"],
+)
+def test_constructor_rejects_invalid_sizes(buffer_size: int, minimum_count: int) -> None:
+    with pytest.raises(ValueError):
+        InMemoryDriftMonitor(
+            backend_name="x",
+            predicted_class_reference=dict(_CLASS_REF),
+            confidence_bucket_reference=dict(_BUCKET_REF),
+            buffer_size=buffer_size,
+            minimum_count=minimum_count,
+        )
+
+
+def test_record_then_report_below_minimum_returns_insufficient_data() -> None:
+    monitor = _make_monitor(minimum_count=10)
+    for _ in range(5):
+        monitor.record(Sentiment.POSITIVE, 0.9)
+    report = monitor.report()
+    assert report.insufficient_data is True
+    assert report.observed_count == 5
+    assert report.predicted_class.psi is None
+    assert report.predicted_class.drift_level is None
+    assert report.predicted_class.reference is not None  # baseline still rendered
+    assert report.confidence_bucket.psi is None
+    assert report.confidence_bucket.drift_level is None
+    assert report.confidence_bucket.reference is not None
+
+
+def test_record_then_report_at_minimum_returns_both_signal_psi() -> None:
+    monitor = _make_monitor(minimum_count=10)
+    for _ in range(6):
+        monitor.record(Sentiment.POSITIVE, 0.9)
+    for _ in range(2):
+        monitor.record(Sentiment.NEGATIVE, 0.7)
+    for _ in range(2):
+        monitor.record(Sentiment.NEUTRAL, 0.5)
+    report = monitor.report()
+    assert report.insufficient_data is False
+    assert report.observed_count == 10
+    assert isinstance(report.predicted_class.psi, float)
+    assert report.predicted_class.drift_level in {
+        DriftLevel.STABLE,
+        DriftLevel.MODERATE,
+        DriftLevel.SIGNIFICANT,
+    }
+    assert isinstance(report.confidence_bucket.psi, float)
+    assert report.confidence_bucket.drift_level in {
+        DriftLevel.STABLE,
+        DriftLevel.MODERATE,
+        DriftLevel.SIGNIFICANT,
+    }
+
+
+def test_report_observed_proportions_sum_to_one() -> None:
+    monitor = _make_monitor(minimum_count=4)
+    monitor.record(Sentiment.POSITIVE, 0.9)
+    monitor.record(Sentiment.POSITIVE, 0.7)
+    monitor.record(Sentiment.NEGATIVE, 0.55)
+    monitor.record(Sentiment.NEUTRAL, 0.5)
+    report = monitor.report()
+    assert math.isclose(sum(report.predicted_class.observed.values()), 1.0)
+    assert math.isclose(sum(report.confidence_bucket.observed.values()), 1.0)
+
+
+def test_buffer_wraps_after_capacity() -> None:
+    monitor = _make_monitor(buffer_size=50, minimum_count=10)
+    # First batch — should be evicted.
+    for _ in range(50):
+        monitor.record(Sentiment.POSITIVE, 0.9)
+    # Second batch — keeps the buffer pinned at NEGATIVE only.
+    for _ in range(150):
+        monitor.record(Sentiment.NEGATIVE, 0.55)
+    report = monitor.report()
+    assert report.observed_count == 50
+    assert report.predicted_class.observed[Sentiment.POSITIVE.value] == 0.0
+    assert report.predicted_class.observed[Sentiment.NEGATIVE.value] == 1.0
+    assert report.confidence_bucket.observed["low"] == 1.0
+    assert report.confidence_bucket.observed["high"] == 0.0
+
+
+def test_report_handles_missing_predicted_class_reference() -> None:
+    monitor = _make_monitor(
+        predicted_class_reference=None,
+        confidence_bucket_reference=dict(_BUCKET_REF),
+        minimum_count=4,
+    )
+    for _ in range(4):
+        monitor.record(Sentiment.POSITIVE, 0.9)
+    report = monitor.report()
+    assert report.predicted_class.reference_missing is True
+    assert report.predicted_class.psi is None
+    assert report.predicted_class.drift_level is None
+    assert report.predicted_class.reference is None
+    assert report.predicted_class.observed  # still populated
+    # Other signal still reports normally.
+    assert report.confidence_bucket.reference_missing is False
+    assert isinstance(report.confidence_bucket.psi, float)
+
+
+def test_report_handles_missing_confidence_reference() -> None:
+    monitor = _make_monitor(
+        predicted_class_reference=dict(_CLASS_REF),
+        confidence_bucket_reference=None,
+        minimum_count=4,
+    )
+    for _ in range(4):
+        monitor.record(Sentiment.POSITIVE, 0.9)
+    report = monitor.report()
+    assert report.confidence_bucket.reference_missing is True
+    assert report.confidence_bucket.psi is None
+    assert report.confidence_bucket.drift_level is None
+    assert report.confidence_bucket.reference is None
+    assert report.confidence_bucket.observed
+    assert report.predicted_class.reference_missing is False
+    assert isinstance(report.predicted_class.psi, float)
+
+
+def test_concurrent_records_do_not_lose_writes() -> None:
+    monitor = _make_monitor(buffer_size=200, minimum_count=10)
+
+    def _do_record(_i: int) -> None:
+        monitor.record(Sentiment.POSITIVE, 0.9)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(_do_record, range(100)))
+
+    report = monitor.report()
+    assert report.observed_count == 100
+
+
+_ARABIC_CHAR_RE = re.compile(r"[؀-ۿݐ-ݿ]")
+
+
+def test_buffer_contents_contain_no_text() -> None:
+    monitor = _make_monitor(minimum_count=4)
+    arabic_inputs = [
+        ("هذا المنتج رائع جداً", Sentiment.POSITIVE, 0.93),
+        ("خدمة سيئة للغاية", Sentiment.NEGATIVE, 0.71),
+        ("الطعام مقبول", Sentiment.NEUTRAL, 0.52),
+        ("السرّيّة محفوظة", Sentiment.POSITIVE, 0.81),
+    ]
+    for _text, label, conf in arabic_inputs:
+        # Adapter must accept only (label, confidence) — no text channel exists.
+        monitor.record(label, conf)
+    buffer_repr = repr(monitor._buffer)  # type: ignore[attr-defined]
+    assert _ARABIC_CHAR_RE.search(buffer_repr) is None, buffer_repr
+    for text, _label, _conf in arabic_inputs:
+        assert text not in buffer_repr
