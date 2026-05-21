@@ -81,17 +81,22 @@ Empty or whitespace-only text returns HTTP 422 (Pydantic validation).
 
 ## Status
 
-**Phase 0 — walking skeleton.** The current adapter is a stub that always returns `neutral`
-with confidence `0.0`. This phase exists to lock in the architecture (domain boundary,
-adapter wiring, API contract, tests) before adding a real model.
+**Phase 1 — CatBoost + TF-IDF baseline trained.** Per-class F1 on the held-out HARD test
+split: **positive 0.90 / negative 0.72 / neutral 0.68**, **F1 macro 0.765** (acceptance
+gate was ≥ 0.65). The adapter sits behind `SentimentClassifierPort` but the API still
+serves `StubClassifier`; rewire is Phase 3.
+
+See [`docs/phase-01-baseline-results.md`](docs/phase-01-baseline-results.md) for the full
+results card — confusion matrix, demo on curated Arabic inputs (MSA, Gulf dialect,
+negation, OOV), and what the baseline gets right vs. honestly fails at.
 
 Roadmap:
 
-- **Phase 1** — CatBoost + TF-IDF baseline on the HARD Arabic Sentiment Analysis dataset;
-  per-class F1 evaluation.
+- ~~**Phase 0**~~ — walking skeleton (stub adapter, fitness test, FastAPI shape). ✅
+- ~~**Phase 1**~~ — CatBoost + TF-IDF baseline on HARD; per-class F1. ✅
 - **Phase 2** — AraBERT LoRA fine-tuning; MLflow experiment tracking and model registry.
-- **Phase 3** — Swap the stub for the real model in the inference path.
-- **Phase 4** — PSI drift monitoring.
+- **Phase 3** — Swap the stub for the real model in `/predict`.
+- **Phase 4** — PSI drift monitoring, Gulf vs. MSA dialect breakdown.
 - **Phase 5** — Azure Container Apps deployment (UAE North).
 
 ## Author
