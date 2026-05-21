@@ -8,10 +8,16 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from pathlib import Path
 
 from sklearn.model_selection import train_test_split
 
 from sentiment.domain.models import Sentiment
+
+_LOCAL_TSV_CANDIDATES: tuple[Path, ...] = (
+    Path("data/raw/unbalanced-reviews.txt"),
+    Path("data/raw/balanced-reviews.txt"),
+)
 
 
 @dataclass(frozen=True)
@@ -52,7 +58,18 @@ class HARDDataset:
         self.seed = seed
 
     def load(self) -> DatasetSplits:
-        rows = _fetch_hf_rows(self.source)
+        local = _pick_local_tsv()
+        if self.source == "local":
+            if local is None:
+                raise FileNotFoundError(
+                    "no local HARD TSV found in data/raw/ "
+                    "(expected unbalanced-reviews.txt or balanced-reviews.txt)"
+                )
+            rows = _read_local_tsv(local)
+        elif self.source == "default" and local is not None:
+            rows = _read_local_tsv(local)
+        else:
+            rows = _fetch_hf_rows(self.source)
         return self.from_rows(rows, seed=self.seed)
 
     @classmethod
@@ -84,6 +101,40 @@ class HARDDataset:
             stratify=rest_labels,
         )
         return DatasetSplits(train=list(train), dev=list(dev), test=list(test))
+
+
+def _pick_local_tsv() -> Path | None:
+    for candidate in _LOCAL_TSV_CANDIDATES:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _read_local_tsv(path: Path) -> list[tuple[str, int]]:
+    """Parse the upstream HARD balanced-reviews TSV (UTF-16, tab-delimited)."""
+    if not path.exists():
+        raise FileNotFoundError(f"local HARD TSV not found at {path}")
+    rows: list[tuple[str, int]] = []
+    with path.open(encoding="utf-16") as fh:
+        header = fh.readline().rstrip("\n").split("\t")
+        rating_idx = header.index("rating")
+        review_idx = header.index("review")
+        for line in fh:
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) <= max(rating_idx, review_idx):
+                continue
+            review = parts[review_idx].strip()
+            rating_raw = parts[rating_idx].strip()
+            if not review or not rating_raw:
+                continue
+            try:
+                rating = int(rating_raw)
+            except ValueError:
+                continue
+            if rating not in (1, 2, 3, 4, 5):
+                continue
+            rows.append((review, rating))
+    return rows
 
 
 def _fetch_hf_rows(source: str) -> list[tuple[str, int]]:

@@ -42,8 +42,8 @@ def _fit_vectorizer(texts: Sequence[str]) -> TfidfVectorizer:
     vec = TfidfVectorizer(
         analyzer="word",
         ngram_range=(1, 2),
-        max_features=50_000,
-        min_df=2,
+        max_features=20_000,
+        min_df=3,
         sublinear_tf=True,
     )
     vec.fit(texts)
@@ -57,15 +57,16 @@ def _fit_classifier(
     y_dev: np.ndarray,
 ) -> CatBoostClassifier:
     clf = CatBoostClassifier(
-        iterations=500,
+        iterations=200,
         depth=6,
-        learning_rate=0.05,
+        learning_rate=0.1,
         loss_function="MultiClass",
-        eval_metric="TotalF1",
+        eval_metric="MultiClass",
+        auto_class_weights="Balanced",
         od_type="Iter",
-        od_wait=30,
+        od_wait=20,
         random_seed=42,
-        verbose=100,
+        verbose=50,
         task_type="CPU",
         allow_writing_files=False,
     )
@@ -79,12 +80,11 @@ def _evaluate(
     y_test: np.ndarray,
 ) -> tuple[dict[str, float], float, list[list[int]]]:
     preds = clf.predict(x_test).astype(int).ravel()
-    per_class = f1_score(y_test, preds, labels=list(range(len(_LABEL_ORDER))), average=None)
-    macro = float(f1_score(y_test, preds, average="macro"))
+    label_ids = list(range(len(_LABEL_ORDER)))
+    per_class = f1_score(y_test, preds, labels=label_ids, average=None, zero_division=0.0)
+    macro = float(f1_score(y_test, preds, labels=label_ids, average="macro", zero_division=0.0))
     cm = confusion_matrix(y_test, preds, labels=list(range(len(_LABEL_ORDER))))
-    per_class_dict = {
-        _LABEL_ORDER[i].value: float(per_class[i]) for i in range(len(_LABEL_ORDER))
-    }
+    per_class_dict = {_LABEL_ORDER[i].value: float(per_class[i]) for i in range(len(_LABEL_ORDER))}
     return per_class_dict, macro, cm.astype(int).tolist()
 
 
