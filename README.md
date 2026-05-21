@@ -74,28 +74,65 @@ uv run uvicorn api.main:app --reload
 
 ## API
 
-- `GET /health` → `{"status": "ok", "model": "stub"}`
+- `GET /health` → `{"status": "ok", "model": "<backend-id>"}`
 - `POST /predict` with `{"text": "..."}` → `{"text": "...", "sentiment": "positive|negative|neutral", "confidence": float}`
 
-Empty or whitespace-only text returns HTTP 422 (Pydantic validation).
+Empty or whitespace-only text returns HTTP 422 (Pydantic validation). If the
+adapter raises an unexpected exception during inference, the response is
+HTTP 500 with body `{"detail": "internal inference error"}` — the input text
+and the stack trace stay server-side (logged via `logger.exception`).
+
+### Backend selection (env vars)
+
+| Env var               | Values                        | Default                          | `/health` `model`         |
+|-----------------------|-------------------------------|----------------------------------|---------------------------|
+| `SENTIMENT_BACKEND`   | `stub` / `catboost` / `lora`  | `stub`                           | `stub` / `catboost-baseline-v1` / `arabert-lora-v1` |
+| `LORA_MODEL_DIR`      | path                          | `models/arabert-lora-v1`         | (lora only)               |
+| `CATBOOST_MODEL_DIR`  | path                          | `models/catboost-baseline-v1`    | (catboost only)           |
+
+```bash
+# Serve the LoRA fine-tune (requires models/arabert-lora-v1/ on disk)
+SENTIMENT_BACKEND=lora uv run uvicorn api.main:app --port 8000
+
+# Serve the CatBoost baseline
+SENTIMENT_BACKEND=catboost uv run uvicorn api.main:app --port 8000
+```
+
+Unknown backend values or missing model directories fail fast at startup —
+the container does not come up, so a misconfigured deploy is visible to
+the orchestrator (no silent fallback to stub).
 
 ## Status
 
-**Phase 1 — CatBoost + TF-IDF baseline trained.** Per-class F1 on the held-out HARD test
-split: **positive 0.90 / negative 0.72 / neutral 0.68**, **F1 macro 0.765** (acceptance
-gate was ≥ 0.65). The adapter sits behind `SentimentClassifierPort` but the API still
-serves `StubClassifier`; rewire is Phase 3.
+**Phase 3 — `/predict` serves the real model.** `api/main.py` is now a
+composition root only: at FastAPI lifespan startup it reads
+`SENTIMENT_BACKEND` and constructs the chosen adapter once
+(`stub` / `CatBoostAdapter` / `AraBERTLoRAAdapter`), storing it on
+`app.state.classifier`. The endpoint receives it through
+`Depends(get_classifier)`; tests override the seam with
+`app.dependency_overrides`. Default remains `stub` so offline `uv run pytest`
+stays fast (50 tests, no model weights touched).
 
-See [`docs/phase-01-baseline-results.md`](docs/phase-01-baseline-results.md) for the full
-results card — confusion matrix, demo on curated Arabic inputs (MSA, Gulf dialect,
-negation, OOV), and what the baseline gets right vs. honestly fails at.
+**Phase 2 — AraBERT LoRA fine-tune.** F1 macro **0.8344** on the HARD test
+split, +0.070 over the CatBoost baseline (+9.1% relative). Per-class:
+positive 0.945 / negative 0.826 / neutral 0.733. Metrics + 3×3 confusion
+matrix + a curated demo are in [`reports/`](reports/).
+
+**Phase 1 — CatBoost + TF-IDF baseline.** Per-class F1: positive 0.901 /
+negative 0.717 / neutral 0.676, **F1 macro 0.765**. See
+[`docs/phase-01-baseline-results.md`](docs/phase-01-baseline-results.md)
+for the results card.
+
+Real-model `/predict` latency on dev hardware (Apple-silicon MPS, LoRA
+backend, post-warmup): median **~16 ms**, p95 **~17 ms** over 20
+single-text POSTs.
 
 Roadmap:
 
 - ~~**Phase 0**~~ — walking skeleton (stub adapter, fitness test, FastAPI shape). ✅
 - ~~**Phase 1**~~ — CatBoost + TF-IDF baseline on HARD; per-class F1. ✅
-- **Phase 2** — AraBERT LoRA fine-tuning; MLflow experiment tracking and model registry.
-- **Phase 3** — Swap the stub for the real model in `/predict`.
+- ~~**Phase 2**~~ — AraBERT LoRA fine-tuning; MLflow experiment tracking. ✅
+- ~~**Phase 3**~~ — `/predict` dispatches on `SENTIMENT_BACKEND` to the real adapter. ✅
 - **Phase 4** — PSI drift monitoring, Gulf vs. MSA dialect breakdown.
 - **Phase 5** — Azure Container Apps deployment (UAE North).
 
