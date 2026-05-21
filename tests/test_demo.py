@@ -42,3 +42,30 @@ def test_showcase_mode_prints_markdown_table(capsys: pytest.CaptureFixture[str])
     data_lines = [ln for ln in out.splitlines() if ln.startswith("| ") and "---" not in ln]
     # header + N data rows
     assert len(data_lines) == 1 + len(CURATED_CASES)
+
+
+def test_showcase_mode_lora_backend(capsys: pytest.CaptureFixture[str]) -> None:
+    with (
+        patch("sentiment.demo.AraBERTLoRAAdapter", _StubAdapter),
+        patch("sentiment.demo.CatBoostAdapter") as catboost_patch,
+    ):
+        rc = demo.main(["--backend", "lora", "--model-dir", "ignored"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    catboost_patch.assert_not_called()
+    assert "| # | input | predicted | confidence |" in out
+    data_lines = [ln for ln in out.splitlines() if ln.startswith("| ") and "---" not in ln]
+    assert len(data_lines) == 1 + len(CURATED_CASES)
+
+
+def test_single_text_lora_backend(capsys: pytest.CaptureFixture[str]) -> None:
+    with (
+        patch("sentiment.demo.AraBERTLoRAAdapter", _StubAdapter),
+        patch("sentiment.demo.CatBoostAdapter") as catboost_patch,
+    ):
+        rc = demo.main(["--backend", "lora", "--text", "مرحبا", "--model-dir", "ignored"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    catboost_patch.assert_not_called()
+    assert "مرحبا" in out
+    assert "positive" in out

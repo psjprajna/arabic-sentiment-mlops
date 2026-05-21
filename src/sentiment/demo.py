@@ -11,7 +11,9 @@ import sys
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 
+from sentiment.adapters.arabert_lora_classifier import AraBERTLoRAAdapter
 from sentiment.adapters.catboost_classifier import CatBoostAdapter
+from sentiment.domain.classifier import SentimentClassifierPort
 from sentiment.domain.models import SentimentResult
 
 CURATED_CASES: list[str] = [
@@ -25,7 +27,10 @@ CURATED_CASES: list[str] = [
     "Great hotel, excellent service",
 ]
 
-_DEFAULT_MODEL_DIR = Path("models/catboost-baseline-v1")
+_DEFAULT_MODEL_DIRS: dict[str, Path] = {
+    "catboost": Path("models/catboost-baseline-v1"),
+    "lora": Path("models/arabert-lora-v1"),
+}
 
 
 def _format_row(idx: int, text: str, result: SentimentResult) -> str:
@@ -43,15 +48,25 @@ def _render_table(rows: Iterable[tuple[int, str, SentimentResult]]) -> str:
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Showcase the trained CatBoost adapter.")
+    parser = argparse.ArgumentParser(description="Showcase a trained sentiment adapter.")
     parser.add_argument("--text", type=str, default=None)
-    parser.add_argument("--model-dir", type=Path, default=_DEFAULT_MODEL_DIR)
-    return parser.parse_args(argv)
+    parser.add_argument("--backend", type=str, choices=("catboost", "lora"), default="catboost")
+    parser.add_argument("--model-dir", type=Path, default=None)
+    args = parser.parse_args(argv)
+    if args.model_dir is None:
+        args.model_dir = _DEFAULT_MODEL_DIRS[args.backend]
+    return args
+
+
+def _build_adapter(backend: str, model_dir: Path) -> SentimentClassifierPort:
+    if backend == "lora":
+        return AraBERTLoRAAdapter(model_dir)
+    return CatBoostAdapter(model_dir)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
-    adapter = CatBoostAdapter(args.model_dir)
+    adapter = _build_adapter(args.backend, args.model_dir)
     if args.text is not None:
         result = adapter.predict(args.text)
         print(_render_table([(1, args.text, result)]))
