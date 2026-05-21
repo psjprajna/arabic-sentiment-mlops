@@ -236,7 +236,7 @@ def run_lora_training(
         args=training_args,
         train_dataset=train_ds,
         eval_dataset=dev_ds,
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         data_collator=DataCollatorWithPadding(tokenizer),
         compute_metrics=_compute_metrics,
     )
