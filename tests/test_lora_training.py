@@ -76,9 +76,7 @@ class _StubTrainer:
         logits = np.zeros((len(labels), n_classes), dtype=np.float32)
         for i, lbl in enumerate(labels):
             logits[i, lbl] = 10.0  # perfect prediction → F1 = 1.0
-        return SimpleNamespace(
-            predictions=logits, label_ids=np.array(labels), metrics={}
-        )
+        return SimpleNamespace(predictions=logits, label_ids=np.array(labels), metrics={})
 
 
 class _StubTrainingArguments:
@@ -110,9 +108,7 @@ def _patched(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         captured_log.append(kwargs)
         return "stub-run-id"
 
-    monkeypatch.setattr(
-        mod.AutoTokenizer, "from_pretrained", lambda *_a, **_k: _StubTokenizer()
-    )
+    monkeypatch.setattr(mod.AutoTokenizer, "from_pretrained", lambda *_a, **_k: _StubTokenizer())
     monkeypatch.setattr(
         mod.AutoModelForSequenceClassification,
         "from_pretrained",
@@ -136,9 +132,7 @@ def _synthetic_rows(n_per_class: int = 20) -> list[tuple[str, int]]:
     return rows
 
 
-def test_run_lora_training_writes_artifacts(
-    tmp_path: Path, _patched: dict[str, Any]
-) -> None:
+def test_run_lora_training_writes_artifacts(tmp_path: Path, _patched: dict[str, Any]) -> None:
     from sentiment.training.lora import run_lora_training
 
     splits = HARDDataset.from_rows(_synthetic_rows(20), seed=42)
@@ -162,9 +156,7 @@ def test_run_lora_training_writes_artifacts(
     assert report_path.exists()
 
 
-def test_run_lora_training_report_schema(
-    tmp_path: Path, _patched: dict[str, Any]
-) -> None:
+def test_run_lora_training_report_schema(tmp_path: Path, _patched: dict[str, Any]) -> None:
     from sentiment.training.lora import run_lora_training
 
     splits = HARDDataset.from_rows(_synthetic_rows(20), seed=42)
@@ -206,9 +198,7 @@ def test_run_lora_training_report_schema(
         assert parsed["f1_per_class"][cls] is not None
 
 
-def test_run_lora_training_calls_mlflow(
-    tmp_path: Path, _patched: dict[str, Any]
-) -> None:
+def test_run_lora_training_calls_mlflow(tmp_path: Path, _patched: dict[str, Any]) -> None:
     from sentiment.training.lora import run_lora_training
 
     splits = HARDDataset.from_rows(_synthetic_rows(20), seed=42)
@@ -252,9 +242,7 @@ def test_run_lora_training_calls_mlflow(
     assert any(name.endswith(".json") for name in artifact_names)
 
 
-def test_run_lora_training_subsamples_train_split(
-    tmp_path: Path, _patched: dict[str, Any]
-) -> None:
+def test_run_lora_training_subsamples_train_split(tmp_path: Path, _patched: dict[str, Any]) -> None:
     from sentiment.training.lora import run_lora_training
 
     # Build a 270-row split deterministically so train ≈ 216 after the 80/10/10

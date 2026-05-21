@@ -51,9 +51,7 @@ class AraBERTLoRAAdapter(SentimentClassifierPort):
 
         self._device = _pick_device()
         self._tokenizer = AutoTokenizer.from_pretrained(str(model_dir))
-        base = AutoModelForSequenceClassification.from_pretrained(
-            base_model, num_labels=3
-        )
+        base = AutoModelForSequenceClassification.from_pretrained(base_model, num_labels=3)
         model = PeftModel.from_pretrained(base, str(model_dir))
         model.eval()
         model.to(self._device)

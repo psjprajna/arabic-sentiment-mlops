@@ -70,9 +70,7 @@ def _pick_device() -> str:
     return "cpu"
 
 
-def _stratified_subsample(
-    examples: Sequence[Example], n: int, seed: int
-) -> list[Example]:
+def _stratified_subsample(examples: Sequence[Example], n: int, seed: int) -> list[Example]:
     if n >= len(examples):
         return list(examples)
     labels = [ex.sentiment.value for ex in examples]
@@ -109,12 +107,8 @@ def _compute_metrics(eval_pred: tuple[np.ndarray, np.ndarray]) -> dict[str, floa
     logits, labels = eval_pred
     preds = logits.argmax(axis=-1)
     label_ids = list(range(len(_LABEL_ORDER)))
-    per_class = f1_score(
-        labels, preds, labels=label_ids, average=None, zero_division=0.0
-    )
-    macro = f1_score(
-        labels, preds, labels=label_ids, average="macro", zero_division=0.0
-    )
+    per_class = f1_score(labels, preds, labels=label_ids, average=None, zero_division=0.0)
+    macro = f1_score(labels, preds, labels=label_ids, average="macro", zero_division=0.0)
     return {
         "f1_macro": float(macro),
         "f1_positive": float(per_class[0]),
@@ -131,16 +125,10 @@ def _evaluate_on_test(
     labels = output.label_ids
     preds = logits.argmax(axis=-1)
     label_ids = list(range(len(_LABEL_ORDER)))
-    per_class = f1_score(
-        labels, preds, labels=label_ids, average=None, zero_division=0.0
-    )
-    macro = float(
-        f1_score(labels, preds, labels=label_ids, average="macro", zero_division=0.0)
-    )
+    per_class = f1_score(labels, preds, labels=label_ids, average=None, zero_division=0.0)
+    macro = float(f1_score(labels, preds, labels=label_ids, average="macro", zero_division=0.0))
     cm = confusion_matrix(labels, preds, labels=label_ids)
-    per_class_dict = {
-        _LABEL_ORDER[i].value: float(per_class[i]) for i in range(len(_LABEL_ORDER))
-    }
+    per_class_dict = {_LABEL_ORDER[i].value: float(per_class[i]) for i in range(len(_LABEL_ORDER))}
     return per_class_dict, macro, cm.astype(int).tolist()
 
 
@@ -156,9 +144,7 @@ def _persist_lora_adapter(
         staging_dir.mkdir()
         model.save_pretrained(str(staging_dir))  # type: ignore[attr-defined]
         tokenizer.save_pretrained(str(staging_dir))  # type: ignore[attr-defined]
-        (staging_dir / "labels.json").write_text(
-            json.dumps(labels), encoding="utf-8"
-        )
+        (staging_dir / "labels.json").write_text(json.dumps(labels), encoding="utf-8")
         if model_dir.exists():
             shutil.rmtree(model_dir)
         shutil.move(str(staging_dir), str(model_dir))
@@ -167,9 +153,7 @@ def _persist_lora_adapter(
 def _write_report(report_path: Path, report: dict[str, object]) -> None:
     report_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = report_path.with_suffix(report_path.suffix + ".tmp")
-    tmp.write_text(
-        json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    tmp.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(report_path)
 
 
@@ -333,16 +317,12 @@ def run_lora_training(
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Train AraBERT + LoRA on HARD; log to MLflow."
-    )
+    parser = argparse.ArgumentParser(description="Train AraBERT + LoRA on HARD; log to MLflow.")
     parser.add_argument("--model-dir", type=Path, default=_DEFAULT_MODEL_DIR)
     parser.add_argument("--report-path", type=Path, default=_DEFAULT_REPORT_PATH)
     parser.add_argument("--source", type=str, default="default")
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument(
-        "--n-train-subsample", type=int, default=_DEFAULT_N_TRAIN_SUBSAMPLE
-    )
+    parser.add_argument("--n-train-subsample", type=int, default=_DEFAULT_N_TRAIN_SUBSAMPLE)
     parser.add_argument("--mlflow-uri", type=str, default=_DEFAULT_TRACKING_URI)
     parser.add_argument("--base-model", type=str, default=_BASE_MODEL)
     return parser.parse_args(argv)

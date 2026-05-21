@@ -39,9 +39,7 @@ def _build_adapter(
         "attention_mask": torch.zeros((1, 128), dtype=torch.long),
         "token_type_ids": torch.zeros((1, 128), dtype=torch.long),
     }
-    monkeypatch.setattr(
-        mod.AutoTokenizer, "from_pretrained", lambda *_a, **_k: stub_tokenizer
-    )
+    monkeypatch.setattr(mod.AutoTokenizer, "from_pretrained", lambda *_a, **_k: stub_tokenizer)
 
     stub_base = MagicMock()
     monkeypatch.setattr(
@@ -60,32 +58,20 @@ def _build_adapter(
     return AraBERTLoRAAdapter(model_dir)
 
 
-def test_predict_raises_on_empty_text(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    adapter = _build_adapter(
-        tmp_path, logits=[1.0, 0.0, 0.0], monkeypatch=monkeypatch
-    )
+def test_predict_raises_on_empty_text(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    adapter = _build_adapter(tmp_path, logits=[1.0, 0.0, 0.0], monkeypatch=monkeypatch)
     with pytest.raises(ValueError):
         adapter.predict("")
 
 
-def test_predict_raises_on_whitespace(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    adapter = _build_adapter(
-        tmp_path, logits=[1.0, 0.0, 0.0], monkeypatch=monkeypatch
-    )
+def test_predict_raises_on_whitespace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    adapter = _build_adapter(tmp_path, logits=[1.0, 0.0, 0.0], monkeypatch=monkeypatch)
     with pytest.raises(ValueError):
         adapter.predict("   ")
 
 
-def test_predict_returns_original_text(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    adapter = _build_adapter(
-        tmp_path, logits=[3.0, 0.1, 0.5], monkeypatch=monkeypatch
-    )
+def test_predict_returns_original_text(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    adapter = _build_adapter(tmp_path, logits=[3.0, 0.1, 0.5], monkeypatch=monkeypatch)
     diacritized = "رَائِع"  # tashkeel preserved end-to-end
     result = adapter.predict(diacritized)
     assert result.text == diacritized
