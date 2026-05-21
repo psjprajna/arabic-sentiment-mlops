@@ -76,11 +76,23 @@ uv run uvicorn api.main:app --reload
 
 - `GET /health` → `{"status": "ok", "model": "<backend-id>"}`
 - `POST /predict` with `{"text": "..."}` → `{"text": "...", "sentiment": "positive|negative|neutral", "confidence": float}`
+- `GET /metrics/drift` → two-signal Population Stability Index over the
+  most-recent served predictions (predicted-class distribution +
+  confidence-bucket distribution), with `drift_level` ∈ `{stable, moderate,
+  significant}` per industry-standard PSI bands. Returns HTTP 503 with
+  `{"detail": "drift monitoring disabled for stub backend"}` when running
+  the stub (no reference distribution to compare against).
 
 Empty or whitespace-only text returns HTTP 422 (Pydantic validation). If the
 adapter raises an unexpected exception during inference, the response is
 HTTP 500 with body `{"detail": "internal inference error"}` — the input text
 and the stack trace stay server-side (logged via `logger.exception`).
+
+Drift recording is best-effort: a raise inside the monitor's `record(...)`
+is logged at WARNING and swallowed, so `/predict` returns 200 with an intact
+body even if the drift path is broken. The buffer holds only
+`(Sentiment, confidence_bucket_label)` tuples — no input text by type
+signature.
 
 ### Backend selection (env vars)
 
@@ -89,6 +101,8 @@ and the stack trace stay server-side (logged via `logger.exception`).
 | `SENTIMENT_BACKEND`   | `stub` / `catboost` / `lora`  | `stub`                           | `stub` / `catboost-baseline-v1` / `arabert-lora-v1` |
 | `LORA_MODEL_DIR`      | path                          | `models/arabert-lora-v1`         | (lora only)               |
 | `CATBOOST_MODEL_DIR`  | path                          | `models/catboost-baseline-v1`    | (catboost only)           |
+| `DRIFT_BUFFER_SIZE`   | int ≥ 1                       | `1000`                           | drift ring-buffer capacity |
+| `DRIFT_REPORTS_DIR`   | path                          | `reports/`                       | source for `<backend>.json` reference distributions |
 
 ```bash
 # Serve the LoRA fine-tune (requires models/arabert-lora-v1/ on disk)
@@ -104,14 +118,29 @@ the orchestrator (no silent fallback to stub).
 
 ## Status
 
-**Phase 3 — `/predict` serves the real model.** `api/main.py` is now a
+**Phase 4 — PSI drift monitoring.** `GET /metrics/drift` returns
+Population Stability Index for two independent signals computed off one
+in-memory ring buffer of `(Sentiment, bucket_label)` tuples: the
+predicted-class distribution vs. the column sums of the existing
+`reports/<backend>.json` confusion matrix, and a 3-band confidence-bucket
+distribution (`low [0,0.6) / medium [0.6,0.8) / high [0.8,1.0]`) vs. a
+`confidence_histogram` field backfilled by
+`python -m sentiment.training.build_confidence_reference --backend <…>`.
+Per-signal graceful degradation: a missing reference field
+(`confusion_matrix` or `confidence_histogram`) only blinds that signal —
+the other one keeps reporting. The stub backend short-circuits the
+endpoint to 503 since it has no reference to compare against. Recording
+adds **<1 ms median** to `/predict` (measurement noise dominates).
+**88 tests green** on the branch, fitness still clean.
+
+**Phase 3 — `/predict` serves the real model.** `api/main.py` is a
 composition root only: at FastAPI lifespan startup it reads
 `SENTIMENT_BACKEND` and constructs the chosen adapter once
 (`stub` / `CatBoostAdapter` / `AraBERTLoRAAdapter`), storing it on
 `app.state.classifier`. The endpoint receives it through
 `Depends(get_classifier)`; tests override the seam with
 `app.dependency_overrides`. Default remains `stub` so offline `uv run pytest`
-stays fast (50 tests, no model weights touched).
+stays fast (no model weights touched).
 
 **Phase 2 — AraBERT LoRA fine-tune.** F1 macro **0.8344** on the HARD test
 split, +0.070 over the CatBoost baseline (+9.1% relative). Per-class:
@@ -133,8 +162,8 @@ Roadmap:
 - ~~**Phase 1**~~ — CatBoost + TF-IDF baseline on HARD; per-class F1. ✅
 - ~~**Phase 2**~~ — AraBERT LoRA fine-tuning; MLflow experiment tracking. ✅
 - ~~**Phase 3**~~ — `/predict` dispatches on `SENTIMENT_BACKEND` to the real adapter. ✅
-- **Phase 4** — PSI drift monitoring, Gulf vs. MSA dialect breakdown.
-- **Phase 5** — Azure Container Apps deployment (UAE North).
+- ~~**Phase 4**~~ — PSI drift monitoring on `/metrics/drift` (predicted-class + confidence-bucket). ✅
+- **Phase 5** — Gulf vs. MSA dialect breakdown; Azure Container Apps deployment (UAE North).
 
 ## Author
 
