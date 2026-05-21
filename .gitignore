@@ -17,6 +17,10 @@ data/raw/
 data/processed/
 data/
 models/
-reports/
+reports/*
+!reports/.gitkeep
+!reports/*.json
+!reports/*.md
+!reports/*.log
 *.arrow
 *.parquet
