@@ -15,5 +15,8 @@ mlartifacts/
 *.safetensors
 data/raw/
 data/processed/
+data/
+models/
+reports/
 *.arrow
 *.parquet
