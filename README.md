@@ -1,21 +1,43 @@
-# Arabic Sentiment MLOps
+# Arabic Sentiment Analysis
 
-Full MLOps pipeline for Arabic sentiment analysis (positive / negative / neutral) on
-UAE-relevant text. Portfolio proof-of-work for Applied AI / Gen AI engineer roles in the UAE.
+A FastAPI service that classifies Arabic text — Modern Standard Arabic (MSA) and Gulf /
+Emirati dialect — as **positive**, **negative**, or **neutral**, with two interchangeable
+model backends sitting behind a single port: a fast **CatBoost + TF-IDF** baseline and an
+**AraBERT** classifier adapted with **LoRA** for parameter-efficient fine-tuning on
+free-tier hardware. The architecture, evaluation, and serving path are built around the
+constraints that make Arabic sentiment genuinely hard — not the easy MSA-only case the
+literature usually reports.
 
-## Why this project
+## What makes this non-trivial
 
-End-to-end demonstration of the modern MLOps lifecycle on a real, linguistically interesting
-problem:
+- **Diglossia.** UAE-relevant text constantly code-switches between MSA (formal,
+  news-style) and Gulf dialect (colloquial, often transliterated, missing standard
+  spelling). Most pretrained sentiment models are MSA-only and drop several F1 points on
+  Gulf input. This project measures that gap explicitly (per-class F1 with a dialect
+  breakdown in Phase 4), rather than reporting a single dataset-wide accuracy.
+- **Diacritics (tashkeel) carry meaning.** Stripping them is the easy default — and it
+  silently flips sentiment on edge cases (e.g. negation particles). The domain layer
+  preserves the original text; normalization is an adapter concern, so the choice is
+  auditable rather than buried inside a preprocessing script.
+- **No GPU budget.** Full fine-tuning of AraBERT is off the table; LoRA cuts the trainable
+  parameter count to ~1% of the base model so the project trains on free-tier GPUs.
+  CatBoost is the no-GPU baseline that has to be beaten to justify the LoRA work.
+- **Swappable backends, mechanically enforced.** `SentimentClassifierPort` is the only
+  thing the API depends on. The stub (Phase 0), CatBoost adapter (Phase 1), and
+  AraBERT-LoRA adapter (Phase 2) implement it without the domain or API ever importing
+  CatBoost, Torch, Transformers, FastAPI, or MLflow. A fitness test
+  (`tests/test_fitness.py`) parses the domain modules and fails the build if any of those
+  imports sneak in — boundary as code, not as a wiki page.
+- **Evaluation rigor.** Accuracy alone is reported nowhere. Every experiment logs per-class
+  F1 + confusion matrix to MLflow, with the model registry tracking which adapter and
+  dataset version produced each metric.
 
-- Data loading and Arabic-specific preprocessing (MSA and Gulf/Emirati dialect).
-- Two interchangeable model backends — a fast **CatBoost + TF-IDF** baseline and an
-  **AraBERT LoRA** fine-tuned classifier — wired behind the same port so they can be swapped
-  without touching API or domain code.
-- Experiment tracking with **MLflow** (metrics, artifacts, model registry).
-- Per-class F1 evaluation with confusion matrices; accuracy alone is not reported.
-- **FastAPI** serving with input validation and automatic OpenAPI docs.
-- Roadmap to **PSI drift monitoring** and **Azure Container Apps** deployment in UAE North.
+## Out of scope (v1)
+
+- Full fine-tuning of AraBERT — LoRA only.
+- A frontend — the contract is the JSON API.
+- Authentication middleware — lands alongside the Azure deployment in Phase 5.
+- A CI/CD pipeline — local `uv run pytest` is the merge gate until then.
 
 ## Stack
 
