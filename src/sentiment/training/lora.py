@@ -151,8 +151,29 @@ def _persist_lora_adapter(
         shutil.move(str(staging_dir), str(model_dir))
 
 
+def _preserve_existing_confidence_histogram(report_path: Path, report: dict[str, object]) -> None:
+    """Carry forward `confidence_histogram` from a prior report if present.
+
+    The histogram is owned by `sentiment.training.build_confidence_reference`,
+    not by training. LoRA on MPS has tiny non-determinism but the
+    histogram is dominated by the high-confidence bucket — drift across
+    retrains is within float-rounding noise. Preserving here avoids the
+    ~10-minute rebuild after every retrain; operators can still refresh
+    by re-running the build script.
+    """
+    if "confidence_histogram" in report or not report_path.exists():
+        return
+    try:
+        existing = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if "confidence_histogram" in existing:
+        report["confidence_histogram"] = existing["confidence_histogram"]
+
+
 def _write_report(report_path: Path, report: dict[str, object]) -> None:
     report_path.parent.mkdir(parents=True, exist_ok=True)
+    _preserve_existing_confidence_histogram(report_path, report)
     tmp = report_path.with_suffix(report_path.suffix + ".tmp")
     tmp.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(report_path)
