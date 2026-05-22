@@ -118,6 +118,49 @@ the orchestrator (no silent fallback to stub).
 
 ## Status
 
+**Phase 6 — MLflow Model Registry versioning.** Every retrain of either
+backend now registers a new version into the local Model Registry
+(`file:./mlruns`, `models/<name>/version-N/`) under one polymorphic
+`SentimentPyfunc` wrapper that dispatches on `backend_type` at load
+time. Each backend's report JSON gains a new top-level `registry` block
+— `{name, version, run_id, model_uri, registered_at}` — and `GET /health`
+surfaces a strict subset (`{name, version, run_id}`) as `model_version`,
+or `null` when the backend is `stub` or the registry block is absent.
+Serving is unchanged this phase: `_build_classifier` still resolves
+models from the `*_MODEL_DIR` env vars; registry surfacing is
+informational. **Phase 7** will wire registry-resolved loading.
+
+Current registry state on the development tree (run IDs truncated):
+
+| Backend            | Version | Run ID prefix | Notes                              |
+|--------------------|--------:|---------------|------------------------------------|
+| `catboost-baseline`| `"11"`  | `16dede45…`   | 9 stale versions from pre-isolation tests; the registration path itself is unchanged |
+| `arabert-lora`     | `"1"`   | `fdf6edb2…`   | First registration                 |
+
+Inspecting the registry:
+
+```bash
+# Models tab shows both registered names with version histories.
+uv run mlflow ui --backend-store-uri file:./mlruns --port 5001
+
+# The same data in the report JSONs:
+jq '.registry' app/reports/catboost-baseline-v1.json
+jq '.registry' app/reports/arabert-lora-v1.json
+
+# And on /health:
+SENTIMENT_BACKEND=catboost uv run uvicorn api.main:app --port 8000 &
+curl -s http://localhost:8000/health | jq .model_version
+# {"name":"catboost-baseline","version":"11","run_id":"16dede459f…"}
+```
+
+The hexagonal boundary is intact — `SentimentPyfunc` lives in
+`sentiment/training/mlflow_logging.py` (NOT under `domain/`), and
+`tests/test_fitness.py` carries a belt-and-braces guard that fails the
+build if a future contributor moves it. `_preserve_existing_owned_keys`
+generalizes the Phase-4 preservation helper to carry both
+`confidence_histogram` AND Phase-5 `dialect_breakdown` across retrains.
+**206 tests green.**
+
 **Phase 5 — Gulf-vs-MSA dialect breakdown.** Every retrained backend
 report now carries a `dialect_breakdown` block (Gulf and MSA buckets,
 per-class F1 + confusion matrix + bucket size) under a `tagger:
@@ -191,8 +234,5 @@ Roadmap:
 - ~~**Phase 3**~~ — `/predict` dispatches on `SENTIMENT_BACKEND` to the real adapter. ✅
 - ~~**Phase 4**~~ — PSI drift monitoring on `/metrics/drift` (predicted-class + confidence-bucket). ✅
 - ~~**Phase 5**~~ — Gulf vs. MSA dialect breakdown (lexicon-v1 tagger, both backends, real numbers in `reports/`). ✅
-- **Phase 6** — Model registry versioning; MLflow surfacing of drift + dialect metrics; Azure Container Apps deployment (UAE North).
-
-## Author
-
-Prajna Shetty.
+- ~~**Phase 6**~~ — MLflow Model Registry versioning; `/health` surfaces `model_version`; carry-forward of Phase-4/5 fields across retrains. ✅
+- **Phase 7** — Registry-resolved serving (load via `models:/<name>/<version>`); SQLite migration off the deprecated `file://` backend; Azure Container Apps deployment (UAE North).

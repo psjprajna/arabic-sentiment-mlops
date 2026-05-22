@@ -34,7 +34,7 @@
     "negative",
     "neutral"
   ],
-  "trained_at": "2026-05-22T06:31:09.873833+00:00",
+  "trained_at": "2026-05-22T11:41:03.472724+00:00",
   "dialect_breakdown": {
     "tagger": "lexicon-v1",
     "gulf": {
@@ -90,6 +90,13 @@
       ]
     },
     "gulf_share": 0.01025465732353444
+  },
+  "registry": {
+    "name": "catboost-baseline",
+    "version": "11",
+    "run_id": "16dede459f8347ff80e8af02e4e2acee",
+    "model_uri": "runs:/16dede459f8347ff80e8af02e4e2acee/model",
+    "registered_at": "2026-05-22T11:41:16.281660+00:00"
   },
   "confidence_histogram": {
     "low": 0.3160387723710233,
