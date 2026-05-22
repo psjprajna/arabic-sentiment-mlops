@@ -470,3 +470,93 @@ def test_lifespan_rejects_invalid_drift_buffer_size(monkeypatch: pytest.MonkeyPa
         with TestClient(app):
             pass
     assert "DRIFT_BUFFER_SIZE" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# Phase 6 — /health surfaces MLflow Model Registry version (D5)
+# ---------------------------------------------------------------------------
+
+
+class _FakeCatBoostStub(SentimentClassifierPort):
+    def __init__(self, model_dir: Path) -> None:
+        pass
+
+    def predict(self, text: str) -> SentimentResult:
+        return SentimentResult(text=text, sentiment=Sentiment.POSITIVE, confidence=0.9)
+
+
+def _populated_catboost_report() -> dict[str, object]:
+    return {
+        "registry": {
+            "name": "catboost-baseline",
+            "version": "7",
+            "run_id": "abc123",
+            "model_uri": "runs:/abc123/model",
+            "registered_at": "2026-05-23T14:22:01.812Z",
+        },
+        "confusion_matrix": [[10, 1, 0], [1, 9, 1], [0, 1, 10]],
+        "confidence_histogram": {"0.0-0.1": 0, "0.9-1.0": 33},
+        "f1_per_class": {"positive": 0.9, "negative": 0.85, "neutral": 0.88},
+        "label_order": ["positive", "negative", "neutral"],
+    }
+
+
+def _boot_catboost_with_report(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, report: dict[str, object] | None
+) -> TestClient:
+    reports_dir = tmp_path / "reports"
+    reports_dir.mkdir()
+    if report is not None:
+        (reports_dir / "catboost-baseline-v1.json").write_text(json.dumps(report), encoding="utf-8")
+    monkeypatch.setattr("api.main.CatBoostAdapter", _FakeCatBoostStub)
+    monkeypatch.setenv("SENTIMENT_BACKEND", "catboost")
+    monkeypatch.setenv("CATBOOST_MODEL_DIR", str(tmp_path))
+    monkeypatch.setenv("DRIFT_REPORTS_DIR", str(reports_dir))
+    return TestClient(create_app())
+
+
+def test_health_includes_model_version_when_report_carries_registry_block(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    with _boot_catboost_with_report(monkeypatch, tmp_path, _populated_catboost_report()) as client:
+        response = client.get("/health")
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ok",
+        "model": "catboost-baseline-v1",
+        "model_version": {"name": "catboost-baseline", "version": "7", "run_id": "abc123"},
+    }
+
+
+def test_health_model_version_is_null_when_registry_block_absent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    report = _populated_catboost_report()
+    del report["registry"]
+    with _boot_catboost_with_report(monkeypatch, tmp_path, report) as client:
+        response = client.get("/health")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["model"] == "catboost-baseline-v1"
+    assert body["model_version"] is None
+
+
+def test_health_model_version_is_null_for_stub_backend(stub_client: TestClient) -> None:
+    response = stub_client.get("/health")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["model"] == "stub"
+    assert body["model_version"] is None
+
+
+def test_health_model_version_is_null_when_report_file_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level("ERROR", logger="api.main"):
+        with _boot_catboost_with_report(monkeypatch, tmp_path, None) as client:
+            response = client.get("/health")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["model"] == "catboost-baseline-v1"
+    assert body["model_version"] is None
+    assert caplog.records == []

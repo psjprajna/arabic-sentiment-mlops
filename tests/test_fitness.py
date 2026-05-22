@@ -54,3 +54,12 @@ def test_domain_does_not_import_infrastructure() -> None:
     assert not violations, (
         "ADR-0002 VIOLATION — domain layer imported infrastructure:\n" + "\n".join(violations)
     )
+
+
+def test_pyfunc_wrapper_lives_outside_domain() -> None:
+    """SentimentPyfunc (ADR-0003) must not leak into the domain layer."""
+    assert not (DOMAIN_DIR / "pyfunc_wrapper.py").exists()
+    for path in DOMAIN_DIR.rglob("*.py"):
+        assert "SentimentPyfunc" not in path.read_text(encoding="utf-8"), (
+            f"SentimentPyfunc leaked into {path}"
+        )

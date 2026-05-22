@@ -37,7 +37,11 @@ from transformers import (
 from sentiment.adapters.hard_dataset import DatasetSplits, Example, HARDDataset
 from sentiment.domain.models import Sentiment
 from sentiment.training.dialect_breakdown import compute_dialect_breakdown
-from sentiment.training.mlflow_logging import log_run
+from sentiment.training.mlflow_logging import (
+    SentimentPyfunc,
+    log_artifact_to_run,
+    log_run,
+)
 
 _LABEL_ORDER: tuple[Sentiment, ...] = (
     Sentiment.POSITIVE,
@@ -52,6 +56,8 @@ _DEFAULT_REPORT_PATH = Path("reports/arabert-lora-v1.json")
 _DEFAULT_BASELINE_REPORT = Path("reports/catboost-baseline-v1.json")
 _DEFAULT_N_TRAIN_SUBSAMPLE = 30_000
 _DEFAULT_TRACKING_URI = "file:./mlruns"
+_REGISTERED_MODEL_NAME = "arabert-lora"
+_KEYS_TO_PRESERVE: tuple[str, ...] = ("confidence_histogram", "dialect_breakdown")
 
 _MAX_LENGTH = 128
 _BATCH_SIZE = 16
@@ -151,29 +157,30 @@ def _persist_lora_adapter(
         shutil.move(str(staging_dir), str(model_dir))
 
 
-def _preserve_existing_confidence_histogram(report_path: Path, report: dict[str, object]) -> None:
-    """Carry forward `confidence_histogram` from a prior report if present.
+def _preserve_existing_owned_keys(report_path: Path, report: dict[str, object]) -> None:
+    """Carry forward fields owned by separate scripts from a prior report.
 
-    The histogram is owned by `sentiment.training.build_confidence_reference`,
-    not by training. LoRA on MPS has tiny non-determinism but the
-    histogram is dominated by the high-confidence bucket — drift across
-    retrains is within float-rounding noise. Preserving here avoids the
-    ~10-minute rebuild after every retrain; operators can still refresh
-    by re-running the build script.
+    Phase-4 owns ``confidence_histogram`` (built by
+    ``sentiment.training.build_confidence_reference``); Phase-5's
+    ``dialect_breakdown`` is owned by training itself. Both are tracked so a
+    future training script that stops producing one of them does not silently
+    wipe the prior value. The operator can still refresh ``confidence_histogram``
+    by re-running the build script (~10 min on MPS).
     """
-    if "confidence_histogram" in report or not report_path.exists():
+    if not report_path.exists():
         return
     try:
         existing = json.loads(report_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return
-    if "confidence_histogram" in existing:
-        report["confidence_histogram"] = existing["confidence_histogram"]
+    for key in _KEYS_TO_PRESERVE:
+        if key not in report and key in existing:
+            report[key] = existing[key]
 
 
 def _write_report(report_path: Path, report: dict[str, object]) -> None:
     report_path.parent.mkdir(parents=True, exist_ok=True)
-    _preserve_existing_confidence_histogram(report_path, report)
+    _preserve_existing_owned_keys(report_path, report)
     tmp = report_path.with_suffix(report_path.suffix + ".tmp")
     tmp.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(report_path)
@@ -312,7 +319,9 @@ def run_lora_training(
     }
 
     _persist_lora_adapter(Path(model_dir), model, tokenizer, labels_str)
-    _write_report(Path(report_path), report)
+
+    meta_path = Path(model_dir) / "pyfunc_meta.json"
+    meta_path.write_text(json.dumps({"backend_type": "arabert-lora"}), encoding="utf-8")
 
     params: dict[str, object] = {
         "base_model": base_model,
@@ -336,12 +345,27 @@ def run_lora_training(
         "f1_macro": macro,
         **{f"f1_{cls}": val for cls, val in per_class.items()},
     }
-    log_run(
+    registry_info = log_run(
         run_name="arabert-lora-v1",
         params=params,
         metrics=metrics,
-        artifact_paths=[Path(report_path), Path(model_dir) / "labels.json"],
+        artifact_paths=[Path(model_dir) / "labels.json"],
         tracking_uri=mlflow_tracking_uri,
+        register_as=_REGISTERED_MODEL_NAME,
+        python_model=SentimentPyfunc(),
+        artifacts={
+            "backend_type": str(meta_path),
+            "model_dir": str(model_dir),
+        },
+    )
+    assert isinstance(registry_info, dict)  # narrowed by register_as not None
+    report["registry"] = registry_info
+
+    _write_report(Path(report_path), report)
+    log_artifact_to_run(
+        run_id=registry_info["run_id"],
+        tracking_uri=mlflow_tracking_uri,
+        path=Path(report_path),
     )
 
     shutil.rmtree(staging_dir, ignore_errors=True)
