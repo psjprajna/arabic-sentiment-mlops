@@ -74,7 +74,7 @@ def _build_classifier(
     if backend == "stub":
         return StubClassifier(), None
     requested_version = os.environ.get("MODEL_VERSION")
-    tracking_uri = os.environ.get("MLFLOW_TRACKING_URI", "file:./mlruns")
+    tracking_uri = os.environ.get("MLFLOW_TRACKING_URI", "sqlite:///mlflow.db")
     if backend == "catboost":
         fallback_dir = Path(os.environ.get("CATBOOST_MODEL_DIR", _DEFAULT_CATBOOST_DIR)).resolve()
         return load_from_registry_or_fallback(

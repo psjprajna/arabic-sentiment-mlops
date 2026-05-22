@@ -22,7 +22,8 @@ def _synthetic_rows(n_per_class: int = 20) -> list[tuple[str, int]]:
 
 
 def _tracking_uri(tmp_path: Path) -> str:
-    return f"file:{tmp_path}/mlruns"
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    return f"sqlite:///{tmp_path}/mlflow.db"
 
 
 def test_run_baseline_writes_artifacts_and_clears_bar(tmp_path: Path) -> None:

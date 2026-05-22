@@ -38,7 +38,7 @@ from sentiment.training.mlflow_logging import (
 _LABEL_ORDER: tuple[Sentiment, ...] = (Sentiment.POSITIVE, Sentiment.NEGATIVE, Sentiment.NEUTRAL)
 _DEFAULT_MODEL_DIR = Path("models/catboost-baseline-v1")
 _DEFAULT_REPORT_PATH = Path("reports/catboost-baseline-v1.json")
-_DEFAULT_TRACKING_URI = "file:./mlruns"
+_DEFAULT_TRACKING_URI = "sqlite:///mlflow.db"
 _REGISTERED_MODEL_NAME = "catboost-baseline"
 _MAX_FEATURES = 20_000
 _ITERATIONS = 200

@@ -45,7 +45,7 @@ def _patch_loader(
         backend: str,
         fallback_dir: Path,
         requested_version: str | None,
-        tracking_uri: str = "file:./mlruns",
+        tracking_uri: str = "sqlite:///mlflow.db",
     ) -> tuple[SentimentClassifierPort, RegistryVersionInfo | None]:
         if captured is not None:
             captured.append(
@@ -610,7 +610,7 @@ def test_mlflow_tracking_uri_env_forwarded_to_loader(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     captured: list[dict[str, object]] = []
-    monkeypatch.setenv("MLFLOW_TRACKING_URI", "file:///custom/mlruns")
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", "sqlite:///custom.db")
     with _boot_catboost_with_loader(
         monkeypatch,
         tmp_path,
@@ -618,4 +618,4 @@ def test_mlflow_tracking_uri_env_forwarded_to_loader(
         captured=captured,
     ):
         pass
-    assert captured[0]["tracking_uri"] == "file:///custom/mlruns"
+    assert captured[0]["tracking_uri"] == "sqlite:///custom.db"

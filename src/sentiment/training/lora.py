@@ -55,7 +55,7 @@ _DEFAULT_MODEL_DIR = Path("models/arabert-lora-v1")
 _DEFAULT_REPORT_PATH = Path("reports/arabert-lora-v1.json")
 _DEFAULT_BASELINE_REPORT = Path("reports/catboost-baseline-v1.json")
 _DEFAULT_N_TRAIN_SUBSAMPLE = 30_000
-_DEFAULT_TRACKING_URI = "file:./mlruns"
+_DEFAULT_TRACKING_URI = "sqlite:///mlflow.db"
 _REGISTERED_MODEL_NAME = "arabert-lora"
 _KEYS_TO_PRESERVE: tuple[str, ...] = ("confidence_histogram", "dialect_breakdown")
 
