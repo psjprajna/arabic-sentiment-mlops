@@ -1,4 +1,5 @@
-"""API integration tests — Phase 3 backend dispatch + Phase 4 drift monitoring."""
+"""API integration tests — backend dispatch (Phase 3), drift (Phase 4),
+registry-resolved serving (Phase 7)."""
 
 from __future__ import annotations
 
@@ -10,6 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from api.main import create_app, get_classifier, get_drift_monitor
+from sentiment.adapters.mlflow_registry_classifier import RegistryVersionInfo
 from sentiment.domain.classifier import SentimentClassifierPort
 from sentiment.domain.drift import (
     DriftLevel,
@@ -18,6 +20,47 @@ from sentiment.domain.drift import (
     SignalReport,
 )
 from sentiment.domain.models import Sentiment, SentimentResult
+
+
+@pytest.fixture(autouse=True)
+def _clean_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Strip env vars that would otherwise leak between tests."""
+    for var in ("MODEL_VERSION", "MLFLOW_TRACKING_URI"):
+        monkeypatch.delenv(var, raising=False)
+    yield
+
+
+def _patch_loader(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    classifier: SentimentClassifierPort,
+    version_info: RegistryVersionInfo | None,
+    captured: list[dict[str, object]] | None = None,
+    raises: BaseException | None = None,
+) -> None:
+    """Replace api.main.load_from_registry_or_fallback with a deterministic fake."""
+
+    def _fake_loader(
+        *,
+        backend: str,
+        fallback_dir: Path,
+        requested_version: str | None,
+        tracking_uri: str = "file:./mlruns",
+    ) -> tuple[SentimentClassifierPort, RegistryVersionInfo | None]:
+        if captured is not None:
+            captured.append(
+                {
+                    "backend": backend,
+                    "fallback_dir": fallback_dir,
+                    "requested_version": requested_version,
+                    "tracking_uri": tracking_uri,
+                }
+            )
+        if raises is not None:
+            raise raises
+        return classifier, version_info
+
+    monkeypatch.setattr("api.main.load_from_registry_or_fallback", _fake_loader)
 
 
 @pytest.fixture
@@ -65,17 +108,19 @@ def test_lifespan_loads_stub_by_default(monkeypatch: pytest.MonkeyPatch) -> None
         assert body["model"] == "stub"
 
 
+class _FakeBackend(SentimentClassifierPort):
+    def predict(self, text: str) -> SentimentResult:
+        return SentimentResult(text=text, sentiment=Sentiment.POSITIVE, confidence=0.9)
+
+
 def test_lifespan_loads_lora_when_env_set(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    init_calls: list[Path] = []
-
-    class FakeLoRA(SentimentClassifierPort):
-        def __init__(self, model_dir: Path, base_model: str = "ignored") -> None:
-            init_calls.append(Path(model_dir))
-
-        def predict(self, text: str) -> SentimentResult:
-            return SentimentResult(text=text, sentiment=Sentiment.POSITIVE, confidence=0.9)
-
-    monkeypatch.setattr("api.main.AraBERTLoRAAdapter", FakeLoRA)
+    captured: list[dict[str, object]] = []
+    _patch_loader(
+        monkeypatch,
+        classifier=_FakeBackend(),
+        version_info=RegistryVersionInfo(name="arabert-lora", version="1", run_id="r"),
+        captured=captured,
+    )
     monkeypatch.setenv("SENTIMENT_BACKEND", "lora")
     monkeypatch.setenv("LORA_MODEL_DIR", str(tmp_path))
 
@@ -85,22 +130,21 @@ def test_lifespan_loads_lora_when_env_set(monkeypatch: pytest.MonkeyPatch, tmp_p
         body = client.get("/health").json()
         assert body["model"] == "arabert-lora-v1"
 
-    assert init_calls == [tmp_path.resolve()]
+    assert len(captured) == 1
+    assert captured[0]["backend"] == "lora"
+    assert captured[0]["fallback_dir"] == tmp_path.resolve()
 
 
 def test_lifespan_loads_catboost_when_env_set(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    init_calls: list[Path] = []
-
-    class FakeCatBoost(SentimentClassifierPort):
-        def __init__(self, model_dir: Path) -> None:
-            init_calls.append(Path(model_dir))
-
-        def predict(self, text: str) -> SentimentResult:
-            return SentimentResult(text=text, sentiment=Sentiment.NEGATIVE, confidence=0.7)
-
-    monkeypatch.setattr("api.main.CatBoostAdapter", FakeCatBoost)
+    captured: list[dict[str, object]] = []
+    _patch_loader(
+        monkeypatch,
+        classifier=_FakeBackend(),
+        version_info=RegistryVersionInfo(name="catboost-baseline", version="11", run_id="r"),
+        captured=captured,
+    )
     monkeypatch.setenv("SENTIMENT_BACKEND", "catboost")
     monkeypatch.setenv("CATBOOST_MODEL_DIR", str(tmp_path))
 
@@ -110,7 +154,9 @@ def test_lifespan_loads_catboost_when_env_set(
         body = client.get("/health").json()
         assert body["model"] == "catboost-baseline-v1"
 
-    assert init_calls == [tmp_path.resolve()]
+    assert len(captured) == 1
+    assert captured[0]["backend"] == "catboost"
+    assert captured[0]["fallback_dir"] == tmp_path.resolve()
 
 
 def test_lifespan_fails_fast_on_unknown_backend(
@@ -127,10 +173,17 @@ def test_lifespan_fails_fast_on_unknown_backend(
         assert name in msg
 
 
-def test_lifespan_fails_fast_when_lora_model_dir_missing(
+def test_lifespan_fails_fast_when_loader_raises_filesystem_error(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    """Phase 7: registry miss + missing fallback dir → loader propagates FileNotFoundError."""
     missing = tmp_path / "definitely-not-here"
+    _patch_loader(
+        monkeypatch,
+        classifier=_FakeBackend(),
+        version_info=None,
+        raises=FileNotFoundError(f"missing LoRA marker: {missing}"),
+    )
     monkeypatch.setenv("SENTIMENT_BACKEND", "lora")
     monkeypatch.setenv("LORA_MODEL_DIR", str(missing))
     app = create_app()
@@ -356,13 +409,6 @@ def test_metrics_drift_returns_503_for_stub_backend(monkeypatch: pytest.MonkeyPa
 def test_metrics_drift_marks_signal_reference_missing_when_field_absent(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    class FakeLoRA(SentimentClassifierPort):
-        def __init__(self, model_dir: Path, base_model: str = "ignored") -> None:
-            pass
-
-        def predict(self, text: str) -> SentimentResult:
-            return SentimentResult(text=text, sentiment=Sentiment.POSITIVE, confidence=0.9)
-
     reports_dir = tmp_path / "reports"
     reports_dir.mkdir()
     # Report has confidence_histogram but NO confusion_matrix.
@@ -371,7 +417,7 @@ def test_metrics_drift_marks_signal_reference_missing_when_field_absent(
         encoding="utf-8",
     )
 
-    monkeypatch.setattr("api.main.AraBERTLoRAAdapter", FakeLoRA)
+    _patch_loader(monkeypatch, classifier=_FakeBackend(), version_info=None)
     monkeypatch.setenv("SENTIMENT_BACKEND", "lora")
     monkeypatch.setenv("LORA_MODEL_DIR", str(tmp_path))
     monkeypatch.setenv("DRIFT_REPORTS_DIR", str(reports_dir))
@@ -454,14 +500,7 @@ def test_metrics_drift_response_omits_text_payload(monkeypatch: pytest.MonkeyPat
 
 
 def test_lifespan_rejects_invalid_drift_buffer_size(monkeypatch: pytest.MonkeyPatch) -> None:
-    class FakeLoRA(SentimentClassifierPort):
-        def __init__(self, model_dir: Path, base_model: str = "ignored") -> None:
-            pass
-
-        def predict(self, text: str) -> SentimentResult:
-            return SentimentResult(text=text, sentiment=Sentiment.POSITIVE, confidence=0.9)
-
-    monkeypatch.setattr("api.main.AraBERTLoRAAdapter", FakeLoRA)
+    _patch_loader(monkeypatch, classifier=_FakeBackend(), version_info=None)
     monkeypatch.setenv("SENTIMENT_BACKEND", "lora")
     monkeypatch.setenv("LORA_MODEL_DIR", "/tmp")
     monkeypatch.setenv("DRIFT_BUFFER_SIZE", "0")
@@ -473,67 +512,54 @@ def test_lifespan_rejects_invalid_drift_buffer_size(monkeypatch: pytest.MonkeyPa
 
 
 # ---------------------------------------------------------------------------
-# Phase 6 — /health surfaces MLflow Model Registry version (D5)
+# Phase 7 (ADR-0004) — /health reflects what was actually loaded
 # ---------------------------------------------------------------------------
 
 
-class _FakeCatBoostStub(SentimentClassifierPort):
-    def __init__(self, model_dir: Path) -> None:
-        pass
-
-    def predict(self, text: str) -> SentimentResult:
-        return SentimentResult(text=text, sentiment=Sentiment.POSITIVE, confidence=0.9)
-
-
-def _populated_catboost_report() -> dict[str, object]:
-    return {
-        "registry": {
-            "name": "catboost-baseline",
-            "version": "7",
-            "run_id": "abc123",
-            "model_uri": "runs:/abc123/model",
-            "registered_at": "2026-05-23T14:22:01.812Z",
-        },
-        "confusion_matrix": [[10, 1, 0], [1, 9, 1], [0, 1, 10]],
-        "confidence_histogram": {"0.0-0.1": 0, "0.9-1.0": 33},
-        "f1_per_class": {"positive": 0.9, "negative": 0.85, "neutral": 0.88},
-        "label_order": ["positive", "negative", "neutral"],
-    }
-
-
-def _boot_catboost_with_report(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, report: dict[str, object] | None
+def _boot_catboost_with_loader(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    version_info: RegistryVersionInfo | None,
+    captured: list[dict[str, object]] | None = None,
 ) -> TestClient:
-    reports_dir = tmp_path / "reports"
-    reports_dir.mkdir()
-    if report is not None:
-        (reports_dir / "catboost-baseline-v1.json").write_text(json.dumps(report), encoding="utf-8")
-    monkeypatch.setattr("api.main.CatBoostAdapter", _FakeCatBoostStub)
+    _patch_loader(
+        monkeypatch,
+        classifier=_FakeBackend(),
+        version_info=version_info,
+        captured=captured,
+    )
     monkeypatch.setenv("SENTIMENT_BACKEND", "catboost")
     monkeypatch.setenv("CATBOOST_MODEL_DIR", str(tmp_path))
-    monkeypatch.setenv("DRIFT_REPORTS_DIR", str(reports_dir))
     return TestClient(create_app())
 
 
-def test_health_includes_model_version_when_report_carries_registry_block(
+def test_health_reports_registry_version_when_loaded(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    with _boot_catboost_with_report(monkeypatch, tmp_path, _populated_catboost_report()) as client:
+    with _boot_catboost_with_loader(
+        monkeypatch,
+        tmp_path,
+        version_info=RegistryVersionInfo(name="catboost-baseline", version="3", run_id="run-abc"),
+    ) as client:
         response = client.get("/health")
     assert response.status_code == 200
     assert response.json() == {
         "status": "ok",
         "model": "catboost-baseline-v1",
-        "model_version": {"name": "catboost-baseline", "version": "7", "run_id": "abc123"},
+        "model_version": {
+            "name": "catboost-baseline",
+            "version": "3",
+            "run_id": "run-abc",
+            "source": "registry",
+        },
     }
 
 
-def test_health_model_version_is_null_when_registry_block_absent(
+def test_health_reports_null_version_on_filesystem_fallback(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    report = _populated_catboost_report()
-    del report["registry"]
-    with _boot_catboost_with_report(monkeypatch, tmp_path, report) as client:
+    with _boot_catboost_with_loader(monkeypatch, tmp_path, version_info=None) as client:
         response = client.get("/health")
     assert response.status_code == 200
     body = response.json()
@@ -549,14 +575,47 @@ def test_health_model_version_is_null_for_stub_backend(stub_client: TestClient) 
     assert body["model_version"] is None
 
 
-def test_health_model_version_is_null_when_report_file_missing(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+def test_model_version_env_passed_to_loader(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    with caplog.at_level("ERROR", logger="api.main"):
-        with _boot_catboost_with_report(monkeypatch, tmp_path, None) as client:
-            response = client.get("/health")
-    assert response.status_code == 200
-    body = response.json()
-    assert body["model"] == "catboost-baseline-v1"
-    assert body["model_version"] is None
-    assert caplog.records == []
+    captured: list[dict[str, object]] = []
+    monkeypatch.setenv("MODEL_VERSION", "5")
+    with _boot_catboost_with_loader(
+        monkeypatch,
+        tmp_path,
+        version_info=RegistryVersionInfo(name="catboost-baseline", version="5", run_id="r"),
+        captured=captured,
+    ) as client:
+        body = client.get("/health").json()
+    assert body["model_version"]["version"] == "5"
+    assert len(captured) == 1
+    assert captured[0]["requested_version"] == "5"
+
+
+def test_loader_called_without_model_version_when_env_unset(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured: list[dict[str, object]] = []
+    with _boot_catboost_with_loader(
+        monkeypatch,
+        tmp_path,
+        version_info=RegistryVersionInfo(name="catboost-baseline", version="9", run_id="r"),
+        captured=captured,
+    ):
+        pass
+    assert captured[0]["requested_version"] is None
+
+
+def test_mlflow_tracking_uri_env_forwarded_to_loader(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured: list[dict[str, object]] = []
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", "file:///custom/mlruns")
+    with _boot_catboost_with_loader(
+        monkeypatch,
+        tmp_path,
+        version_info=None,
+        captured=captured,
+    ):
+        pass
+    assert captured[0]["tracking_uri"] == "file:///custom/mlruns"
