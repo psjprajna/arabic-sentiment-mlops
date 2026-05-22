@@ -25,6 +25,7 @@ from sklearn.metrics import confusion_matrix, f1_score
 from sentiment.adapters.catboost_classifier import _normalize
 from sentiment.adapters.hard_dataset import DatasetSplits, Example, HARDDataset
 from sentiment.domain.models import Sentiment
+from sentiment.training.dialect_breakdown import compute_dialect_breakdown
 
 _LABEL_ORDER: tuple[Sentiment, ...] = (Sentiment.POSITIVE, Sentiment.NEGATIVE, Sentiment.NEUTRAL)
 _DEFAULT_MODEL_DIR = Path("models/catboost-baseline-v1")
@@ -78,14 +79,14 @@ def _evaluate(
     clf: CatBoostClassifier,
     x_test: np.ndarray,
     y_test: np.ndarray,
-) -> tuple[dict[str, float], float, list[list[int]]]:
+) -> tuple[dict[str, float], float, list[list[int]], np.ndarray]:
     preds = clf.predict(x_test).astype(int).ravel()
     label_ids = list(range(len(_LABEL_ORDER)))
     per_class = f1_score(y_test, preds, labels=label_ids, average=None, zero_division=0.0)
     macro = float(f1_score(y_test, preds, labels=label_ids, average="macro", zero_division=0.0))
     cm = confusion_matrix(y_test, preds, labels=list(range(len(_LABEL_ORDER))))
     per_class_dict = {_LABEL_ORDER[i].value: float(per_class[i]) for i in range(len(_LABEL_ORDER))}
-    return per_class_dict, macro, cm.astype(int).tolist()
+    return per_class_dict, macro, cm.astype(int).tolist(), preds
 
 
 def _persist_artifacts(
@@ -106,8 +107,27 @@ def _persist_artifacts(
         shutil.move(str(staging_dir), str(model_dir))
 
 
+def _preserve_existing_confidence_histogram(report_path: Path, report: dict[str, object]) -> None:
+    """Carry forward `confidence_histogram` from a prior report if present.
+
+    The histogram is owned by `sentiment.training.build_confidence_reference`,
+    not by training. With CatBoost's deterministic seed the histogram is
+    stable across retrains; preserving it here saves an explicit rebuild
+    step. The operator can still refresh by re-running the build script.
+    """
+    if "confidence_histogram" in report or not report_path.exists():
+        return
+    try:
+        existing = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if "confidence_histogram" in existing:
+        report["confidence_histogram"] = existing["confidence_histogram"]
+
+
 def _write_report(report_path: Path, report: dict[str, object]) -> None:
     report_path.parent.mkdir(parents=True, exist_ok=True)
+    _preserve_existing_confidence_histogram(report_path, report)
     tmp = report_path.with_suffix(report_path.suffix + ".tmp")
     tmp.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(report_path)
@@ -129,7 +149,16 @@ def run_baseline(
     x_test = vec.transform(test_texts)
 
     clf = _fit_classifier(x_train, y_train, x_dev, y_dev)
-    per_class, macro, cm = _evaluate(clf, x_test, y_test)
+    per_class, macro, cm, preds = _evaluate(clf, x_test, y_test)
+
+    # Use raw Example.text (diacritics preserved) for dialect tagging,
+    # NOT the _normalize-d test_texts that the model consumed.
+    test_texts_raw = [ex.text for ex in splits.test]
+    dialect_breakdown = compute_dialect_breakdown(
+        texts=test_texts_raw,
+        y_true=y_test,
+        y_pred=preds,
+    )
 
     report: dict[str, object] = {
         "model": "catboost-baseline-v1",
@@ -144,6 +173,7 @@ def run_baseline(
         "confusion_matrix": cm,
         "label_order": [s.value for s in _LABEL_ORDER],
         "trained_at": datetime.now(UTC).isoformat(),
+        "dialect_breakdown": dialect_breakdown,
     }
 
     _persist_artifacts(Path(model_dir), clf, vec)

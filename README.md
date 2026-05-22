@@ -14,7 +14,7 @@ literature usually reports.
   news-style) and Gulf dialect (colloquial, often transliterated, missing standard
   spelling). Most pretrained sentiment models are MSA-only and drop several F1 points on
   Gulf input. This project measures that gap explicitly (per-class F1 with a dialect
-  breakdown in Phase 4), rather than reporting a single dataset-wide accuracy.
+  breakdown — see Phase 5), rather than reporting a single dataset-wide accuracy.
 - **Diacritics (tashkeel) carry meaning.** Stripping them is the easy default — and it
   silently flips sentiment on edge cases (e.g. negation particles). The domain layer
   preserves the original text; normalization is an adapter concern, so the choice is
@@ -118,6 +118,33 @@ the orchestrator (no silent fallback to stub).
 
 ## Status
 
+**Phase 5 — Gulf-vs-MSA dialect breakdown.** Every retrained backend
+report now carries a `dialect_breakdown` block (Gulf and MSA buckets,
+per-class F1 + confusion matrix + bucket size) under a `tagger:
+"lexicon-v1"` methodology marker. Dialect labels are produced by a
+curated 27-marker Gulf lexicon in `sentiment/domain/dialect.py` — pure
+Python, no new dependencies, zero infra imports. The lexicon is noisy
+by design (HARD has no ground-truth dialect labels and Twitter-trained
+classifiers don't transfer to formal hotel-review text); the `tagger`
+marker makes the methodology explicit so a future model-based swap is
+a clean version bump.
+
+Real numbers on the full HARD test split (~40,957 rows; **n_gulf=420,
+gulf_share=1.0%**):
+
+| Backend  | Gulf macro F1 | MSA macro F1 |    Δ    |
+|----------|--------------:|-------------:|--------:|
+| CatBoost |    **0.702**  |   **0.765**  | +0.063  |
+| LoRA     |    **0.767**  |   **0.838**  | +0.072  |
+
+The diglossia gap **widens** with the better backend — LoRA fine-tuning
+improves MSA macro by +0.073 but Gulf macro by only +0.064. Neutral is
+the hardest class in both buckets on both backends. This is the gap the
+README has been promising since Phase 0; it's now in the report JSONs as
+hard numbers rather than aspirational copy. **186 tests green** on
+the branch; fitness still clean; `f1_macro` and `confidence_histogram`
+preserved across the retrain.
+
 **Phase 4 — PSI drift monitoring.** `GET /metrics/drift` returns
 Population Stability Index for two independent signals computed off one
 in-memory ring buffer of `(Sentiment, bucket_label)` tuples: the
@@ -163,7 +190,8 @@ Roadmap:
 - ~~**Phase 2**~~ — AraBERT LoRA fine-tuning; MLflow experiment tracking. ✅
 - ~~**Phase 3**~~ — `/predict` dispatches on `SENTIMENT_BACKEND` to the real adapter. ✅
 - ~~**Phase 4**~~ — PSI drift monitoring on `/metrics/drift` (predicted-class + confidence-bucket). ✅
-- **Phase 5** — Gulf vs. MSA dialect breakdown; Azure Container Apps deployment (UAE North).
+- ~~**Phase 5**~~ — Gulf vs. MSA dialect breakdown (lexicon-v1 tagger, both backends, real numbers in `reports/`). ✅
+- **Phase 6** — Model registry versioning; MLflow surfacing of drift + dialect metrics; Azure Container Apps deployment (UAE North).
 
 ## Author
 

@@ -40,3 +40,29 @@ def test_run_baseline_writes_artifacts_and_clears_bar(tmp_path: Path) -> None:
     cm = parsed["confusion_matrix"]
     assert len(cm) == 3 and all(len(row) == 3 for row in cm)
     assert all(isinstance(v, int) for row in cm for v in row)
+
+
+def test_run_baseline_report_includes_dialect_breakdown(tmp_path: Path) -> None:
+    splits = HARDDataset.from_rows(_synthetic_rows(20), seed=42)
+    model_dir = tmp_path / "m"
+    report_path = tmp_path / "r.json"
+
+    report = run_baseline(splits=splits, model_dir=model_dir, report_path=report_path)
+
+    assert "dialect_breakdown" in report
+    breakdown = report["dialect_breakdown"]
+    assert isinstance(breakdown, dict)
+    assert breakdown["tagger"] == "lexicon-v1"
+    assert "gulf" in breakdown and "msa" in breakdown
+    gulf_share = breakdown["gulf_share"]
+    assert isinstance(gulf_share, float)
+    assert 0.0 <= gulf_share <= 1.0
+    # Synthetic rows carry no Gulf markers — gulf bucket is empty.
+    assert breakdown["gulf"] == {"insufficient_examples": True, "n": 0}
+    msa_block = breakdown["msa"]
+    assert isinstance(msa_block, dict)
+    # If MSA bucket has enough rows, it carries full metrics.
+    if "f1_macro" in msa_block:
+        assert "f1_per_class" in msa_block
+        assert "confusion_matrix" in msa_block
+        assert msa_block["n"] >= 20

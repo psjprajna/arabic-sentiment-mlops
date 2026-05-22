@@ -242,6 +242,32 @@ def test_run_lora_training_calls_mlflow(tmp_path: Path, _patched: dict[str, Any]
     assert any(name.endswith(".json") for name in artifact_names)
 
 
+def test_run_lora_training_report_includes_dialect_breakdown(
+    tmp_path: Path, _patched: dict[str, Any]
+) -> None:
+    from sentiment.training.lora import run_lora_training
+
+    splits = HARDDataset.from_rows(_synthetic_rows(20), seed=42)
+    report = run_lora_training(
+        splits=splits,
+        model_dir=tmp_path / "lora",
+        report_path=tmp_path / "lora-report.json",
+        n_train_subsample=30,
+        mlflow_tracking_uri=f"file:{tmp_path}/mlruns",
+    )
+
+    assert "dialect_breakdown" in report
+    breakdown = report["dialect_breakdown"]
+    assert isinstance(breakdown, dict)
+    assert breakdown["tagger"] == "lexicon-v1"
+    assert "gulf" in breakdown and "msa" in breakdown
+    gulf_share = breakdown["gulf_share"]
+    assert isinstance(gulf_share, float)
+    assert 0.0 <= gulf_share <= 1.0
+    # Synthetic LoRA-fixture rows carry no Gulf markers — gulf bucket empty.
+    assert breakdown["gulf"] == {"insufficient_examples": True, "n": 0}
+
+
 def test_run_lora_training_subsamples_train_split(tmp_path: Path, _patched: dict[str, Any]) -> None:
     from sentiment.training.lora import run_lora_training
 
