@@ -96,70 +96,100 @@ signature.
 
 ### Backend selection (env vars)
 
-| Env var               | Values                        | Default                          | `/health` `model`         |
-|-----------------------|-------------------------------|----------------------------------|---------------------------|
-| `SENTIMENT_BACKEND`   | `stub` / `catboost` / `lora`  | `stub`                           | `stub` / `catboost-baseline-v1` / `arabert-lora-v1` |
-| `LORA_MODEL_DIR`      | path                          | `models/arabert-lora-v1`         | (lora only)               |
-| `CATBOOST_MODEL_DIR`  | path                          | `models/catboost-baseline-v1`    | (catboost only)           |
-| `DRIFT_BUFFER_SIZE`   | int ≥ 1                       | `1000`                           | drift ring-buffer capacity |
-| `DRIFT_REPORTS_DIR`   | path                          | `reports/`                       | source for `<backend>.json` reference distributions |
+| Env var                | Values                        | Default                          | Purpose                                                                              |
+|------------------------|-------------------------------|----------------------------------|--------------------------------------------------------------------------------------|
+| `SENTIMENT_BACKEND`    | `stub` / `catboost` / `lora`  | `stub`                           | Picks the active classifier                                                          |
+| `MODEL_VERSION`        | string (e.g. `"3"`)           | latest non-archived              | Phase 7 — pins a specific MLflow Model Registry version; unset → resolve latest      |
+| `MLFLOW_TRACKING_URI`  | URI                           | `file:./mlruns`                  | Phase 7 — registry backend; defaults to local file store per ADR-0003                |
+| `LORA_MODEL_DIR`       | path                          | `models/arabert-lora-v1`         | Filesystem fallback when the registry path fails (empty `mlruns/`, MlflowException)  |
+| `CATBOOST_MODEL_DIR`   | path                          | `models/catboost-baseline-v1`    | Filesystem fallback when the registry path fails                                     |
+| `DRIFT_BUFFER_SIZE`    | int ≥ 1                       | `1000`                           | Drift ring-buffer capacity                                                           |
+| `DRIFT_REPORTS_DIR`    | path                          | `reports/`                       | Source for `<backend>.json` PSI reference distributions                              |
 
 ```bash
-# Serve the LoRA fine-tune (requires models/arabert-lora-v1/ on disk)
+# Serve the latest registered LoRA version (resolved from the registry at startup)
 SENTIMENT_BACKEND=lora uv run uvicorn api.main:app --port 8000
 
-# Serve the CatBoost baseline
-SENTIMENT_BACKEND=catboost uv run uvicorn api.main:app --port 8000
+# Pin to a specific registered version
+SENTIMENT_BACKEND=catboost MODEL_VERSION=3 uv run uvicorn api.main:app --port 8000
+
+# Force the filesystem fallback path (empty registry → falls back to *_MODEL_DIR)
+MLFLOW_TRACKING_URI=file:///tmp/empty-mlruns \
+  SENTIMENT_BACKEND=catboost \
+  CATBOOST_MODEL_DIR=models/catboost-baseline-v1 \
+  uv run uvicorn api.main:app --port 8000
 ```
 
-Unknown backend values or missing model directories fail fast at startup —
-the container does not come up, so a misconfigured deploy is visible to
-the orchestrator (no silent fallback to stub).
+Unknown backend values, missing fallback model directories, or a pinned
+`MODEL_VERSION` that does not exist all fail fast at startup — the
+container does not come up, so a misconfigured deploy is visible to the
+orchestrator. The fallback path itself is opt-in by the absence of
+registry data (empty / unreachable `mlruns/`); a populated registry is
+always preferred and `/health.model_version` reports it.
 
 ## Status
 
+**Phase 7 — Registry-resolved serving.** The MLflow Model Registry is
+now the serving source-of-truth (ADR-0004). At startup,
+`_build_classifier` calls `load_from_registry_or_fallback`, which
+resolves a version (`MODEL_VERSION` env var when pinned, else the
+latest non-archived via `MlflowClient.search_model_versions` ordered
+`version_number DESC`), constructs `MLflowRegistryAdapter` around a
+`mlflow.pyfunc.load_model("models:/<name>/<version>")` call, and
+returns a `(SentimentClassifierPort, RegistryVersionInfo | None)`
+tuple. On an explicit exception set
+(`MlflowException`, `RestException`, `OSError`, `FileNotFoundError`,
+empty-registry sentinel) the loader falls back to the existing
+filesystem adapter from `*_MODEL_DIR` and the second element is
+`None`. `GET /health.model_version` now reflects what was *actually
+loaded* — `{name, version, run_id, source: "registry"}` on the
+registry path, `null` on the filesystem-fallback or stub path. The
+report-file extraction that previously fed `/health` is gone; the
+loader is the single source-of-truth.
+
+```bash
+# Latest registered LoRA version (resolved at startup):
+SENTIMENT_BACKEND=lora uv run uvicorn api.main:app --port 8000 &
+curl -s http://localhost:8000/health | jq .model_version
+# {"name":"arabert-lora","version":"1","run_id":"fdf6edb2…","source":"registry"}
+
+# Pin a specific version:
+SENTIMENT_BACKEND=catboost MODEL_VERSION=11 uv run uvicorn api.main:app --port 8000 &
+curl -s http://localhost:8000/health | jq .model_version
+# {"name":"catboost-baseline","version":"11","run_id":"16dede45…","source":"registry"}
+
+# Forced fallback (empty registry):
+MLFLOW_TRACKING_URI=file:///tmp/empty-mlruns SENTIMENT_BACKEND=catboost \
+  uv run uvicorn api.main:app --port 8000 &
+curl -s http://localhost:8000/health | jq .model_version
+# null   — WARNING logged: "registry load failed … using filesystem fallback"
+```
+
+The hexagonal boundary is preserved: `api/main.py` no longer imports
+concrete adapters; the only serving-side `mlflow` import lives in
+`sentiment/adapters/mlflow_registry_classifier.py`. `test_fitness.py`
+still passes. **219 tests green.** SQLite migration off the deprecated
+`file://` registry backend is deferred (separate ADR / phase) — the
+MLflow 3.12 `FutureWarning` is the lead indicator.
+
 **Phase 6 — MLflow Model Registry versioning.** Every retrain of either
-backend now registers a new version into the local Model Registry
+backend registers a new version into the local Model Registry
 (`file:./mlruns`, `models/<name>/version-N/`) under one polymorphic
 `SentimentPyfunc` wrapper that dispatches on `backend_type` at load
-time. Each backend's report JSON gains a new top-level `registry` block
-— `{name, version, run_id, model_uri, registered_at}` — and `GET /health`
-surfaces a strict subset (`{name, version, run_id}`) as `model_version`,
-or `null` when the backend is `stub` or the registry block is absent.
-Serving is unchanged this phase: `_build_classifier` still resolves
-models from the `*_MODEL_DIR` env vars; registry surfacing is
-informational. **Phase 7** will wire registry-resolved loading.
-
-Current registry state on the development tree (run IDs truncated):
+time. Each backend's report JSON carries a top-level `registry` block —
+`{name, version, run_id, model_uri, registered_at}` — and the registry
+state is the source Phase 7 reads from. Current versions on the
+development tree:
 
 | Backend            | Version | Run ID prefix | Notes                              |
 |--------------------|--------:|---------------|------------------------------------|
 | `catboost-baseline`| `"11"`  | `16dede45…`   | 9 stale versions from pre-isolation tests; the registration path itself is unchanged |
 | `arabert-lora`     | `"1"`   | `fdf6edb2…`   | First registration                 |
 
-Inspecting the registry:
-
 ```bash
-# Models tab shows both registered names with version histories.
+# Inspect via UI:
 uv run mlflow ui --backend-store-uri file:./mlruns --port 5001
-
-# The same data in the report JSONs:
-jq '.registry' app/reports/catboost-baseline-v1.json
-jq '.registry' app/reports/arabert-lora-v1.json
-
-# And on /health:
-SENTIMENT_BACKEND=catboost uv run uvicorn api.main:app --port 8000 &
-curl -s http://localhost:8000/health | jq .model_version
-# {"name":"catboost-baseline","version":"11","run_id":"16dede459f…"}
 ```
-
-The hexagonal boundary is intact — `SentimentPyfunc` lives in
-`sentiment/training/mlflow_logging.py` (NOT under `domain/`), and
-`tests/test_fitness.py` carries a belt-and-braces guard that fails the
-build if a future contributor moves it. `_preserve_existing_owned_keys`
-generalizes the Phase-4 preservation helper to carry both
-`confidence_histogram` AND Phase-5 `dialect_breakdown` across retrains.
-**206 tests green.**
 
 **Phase 5 — Gulf-vs-MSA dialect breakdown.** Every retrained backend
 report now carries a `dialect_breakdown` block (Gulf and MSA buckets,
@@ -235,4 +265,5 @@ Roadmap:
 - ~~**Phase 4**~~ — PSI drift monitoring on `/metrics/drift` (predicted-class + confidence-bucket). ✅
 - ~~**Phase 5**~~ — Gulf vs. MSA dialect breakdown (lexicon-v1 tagger, both backends, real numbers in `reports/`). ✅
 - ~~**Phase 6**~~ — MLflow Model Registry versioning; `/health` surfaces `model_version`; carry-forward of Phase-4/5 fields across retrains. ✅
-- **Phase 7** — Registry-resolved serving (load via `models:/<name>/<version>`); SQLite migration off the deprecated `file://` backend; Azure Container Apps deployment (UAE North).
+- ~~**Phase 7**~~ — Registry-resolved serving (load via `models:/<name>/<version>`); `MODEL_VERSION` env var; filesystem fallback for offline dev; `/health.model_version` reflects what is loaded. ✅
+- **Phase 8** — SQLite migration off the deprecated `file://` registry backend; auto-retraining trigger on PSI drift signals; Azure Container Apps deployment (UAE North).
