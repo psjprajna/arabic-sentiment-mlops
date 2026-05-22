@@ -103,10 +103,22 @@ def _patched(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     from sentiment.training import lora as mod
 
     captured_log: list[dict[str, Any]] = []
+    captured_attach: list[dict[str, Any]] = []
 
-    def _fake_log_run(**kwargs: Any) -> str:
+    def _fake_log_run(**kwargs: Any) -> str | dict[str, str]:
         captured_log.append(kwargs)
-        return "stub-run-id"
+        if kwargs.get("register_as") is None:
+            return "stub-run-id"
+        return {
+            "name": str(kwargs["register_as"]),
+            "version": str(len(captured_log)),
+            "run_id": f"stub-run-{len(captured_log)}",
+            "model_uri": f"runs:/stub-run-{len(captured_log)}/model",
+            "registered_at": "2026-05-22T00:00:00+00:00",
+        }
+
+    def _fake_log_artifact_to_run(**kwargs: Any) -> None:
+        captured_attach.append(kwargs)
 
     monkeypatch.setattr(mod.AutoTokenizer, "from_pretrained", lambda *_a, **_k: _StubTokenizer())
     monkeypatch.setattr(
@@ -120,7 +132,8 @@ def _patched(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     monkeypatch.setattr(mod, "TrainingArguments", _StubTrainingArguments)
     monkeypatch.setattr(mod, "DataCollatorWithPadding", _stub_data_collator)
     monkeypatch.setattr(mod, "log_run", _fake_log_run)
-    return {"captured_log": captured_log}
+    monkeypatch.setattr(mod, "log_artifact_to_run", _fake_log_artifact_to_run)
+    return {"captured_log": captured_log, "captured_attach": captured_attach}
 
 
 def _synthetic_rows(n_per_class: int = 20) -> list[tuple[str, int]]:
@@ -239,7 +252,11 @@ def test_run_lora_training_calls_mlflow(tmp_path: Path, _patched: dict[str, Any]
 
     artifact_names = {Path(p).name for p in call["artifact_paths"]}
     assert "labels.json" in artifact_names
-    assert any(name.endswith(".json") for name in artifact_names)
+
+    # Phase 6 — registry kwargs threaded through.
+    assert call["register_as"] == "arabert-lora"
+    assert call["python_model"] is not None
+    assert set(call["artifacts"].keys()) == {"backend_type", "model_dir"}
 
 
 def test_run_lora_training_report_includes_dialect_breakdown(
@@ -312,3 +329,89 @@ def test_run_lora_training_subsamples_train_split(tmp_path: Path, _patched: dict
         assert abs(sub_counts[idx] - expected) <= 1, (
             f"class {sentiment} off by >1 (sub={sub_counts[idx]}, expected≈{expected})"
         )
+
+
+# ---------------------------------------------------------------------------
+# Phase 6 — MLflow Model Registry surfacing on every LoRA training run
+# ---------------------------------------------------------------------------
+
+
+def test_lora_report_includes_registry_block(tmp_path: Path, _patched: dict[str, Any]) -> None:
+    from sentiment.training.lora import run_lora_training
+
+    splits = HARDDataset.from_rows(_synthetic_rows(20), seed=42)
+    report_path = tmp_path / "lora-report.json"
+    # Pre-populate the report with a Phase-4-owned confidence_histogram so
+    # _preserve_existing_owned_keys carries it forward across retrains.
+    report_path.write_text(
+        json.dumps({"confidence_histogram": {"low": 1, "med": 2, "high": 3}}),
+        encoding="utf-8",
+    )
+
+    report = run_lora_training(
+        splits=splits,
+        model_dir=tmp_path / "lora",
+        report_path=report_path,
+        n_train_subsample=30,
+        mlflow_tracking_uri=f"file:{tmp_path}/mlruns",
+    )
+
+    parsed = json.loads(report_path.read_text(encoding="utf-8"))
+    assert parsed == report
+    assert "registry" in parsed
+    assert set(parsed["registry"].keys()) == {
+        "name",
+        "version",
+        "run_id",
+        "model_uri",
+        "registered_at",
+    }
+    assert parsed["registry"]["name"] == "arabert-lora"
+    assert "dialect_breakdown" in parsed
+    # confidence_histogram carried forward by _preserve_existing_owned_keys.
+    assert parsed["confidence_histogram"] == {"low": 1, "med": 2, "high": 3}
+
+
+def test_lora_registry_version_increments_on_second_call(
+    tmp_path: Path, _patched: dict[str, Any]
+) -> None:
+    from sentiment.training.lora import run_lora_training
+
+    splits = HARDDataset.from_rows(_synthetic_rows(20), seed=42)
+    common = dict(
+        splits=splits,
+        model_dir=tmp_path / "lora",
+        report_path=tmp_path / "lora-report.json",
+        n_train_subsample=30,
+        mlflow_tracking_uri=f"file:{tmp_path}/mlruns",
+    )
+
+    first = run_lora_training(**common)
+    second = run_lora_training(**common)
+
+    assert first["registry"]["version"] == "1"
+    assert second["registry"]["version"] == "2"
+
+
+def test_lora_report_artifact_attached_to_mlflow_run(
+    tmp_path: Path, _patched: dict[str, Any]
+) -> None:
+    from sentiment.training.lora import run_lora_training
+
+    splits = HARDDataset.from_rows(_synthetic_rows(20), seed=42)
+    report_path = tmp_path / "lora-report.json"
+
+    run_lora_training(
+        splits=splits,
+        model_dir=tmp_path / "lora",
+        report_path=report_path,
+        n_train_subsample=30,
+        mlflow_tracking_uri=f"file:{tmp_path}/mlruns",
+    )
+
+    attached = _patched["captured_attach"]
+    assert len(attached) == 1
+    assert Path(attached[0]["path"]) == report_path
+    # run_id comes from the fake log_run's stub return — proves the
+    # attach call ran after log_run resolved and used its run_id.
+    assert attached[0]["run_id"] == "stub-run-1"
