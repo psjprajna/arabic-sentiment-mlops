@@ -1,13 +1,15 @@
 """FastAPI composition root — wires backends + drift monitoring (ADR-0002).
 
 `SENTIMENT_BACKEND` (`stub` | `catboost` | `lora`, default `stub`) picks
-the classifier; non-stub backends also get a `DriftMonitorPort` on
-`app.state.drift_monitor`. This module is the only place that names
-concrete adapter classes.
+the classifier; non-stub backends are resolved through the MLflow Model
+Registry (ADR-0004) with the existing filesystem adapter as fallback for
+offline dev. Non-stub backends also get a `DriftMonitorPort` on
+`app.state.drift_monitor`.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import os
@@ -18,9 +20,11 @@ from pathlib import Path
 from fastapi import Depends, FastAPI, HTTPException, Request
 from pydantic import BaseModel, field_validator
 
-from sentiment.adapters.arabert_lora_classifier import AraBERTLoRAAdapter
-from sentiment.adapters.catboost_classifier import CatBoostAdapter
 from sentiment.adapters.in_memory_drift_monitor import InMemoryDriftMonitor
+from sentiment.adapters.mlflow_registry_classifier import (
+    RegistryVersionInfo,
+    load_from_registry_or_fallback,
+)
 from sentiment.adapters.stub_classifier import StubClassifier
 from sentiment.domain.classifier import SentimentClassifierPort
 from sentiment.domain.drift import DriftMonitorPort, DriftReport, SignalReport
@@ -60,18 +64,32 @@ class PredictResponse(BaseModel):
     confidence: float
 
 
-def _build_classifier(backend: str) -> SentimentClassifierPort:
+def _build_classifier(
+    backend: str,
+) -> tuple[SentimentClassifierPort, RegistryVersionInfo | None]:
     if backend not in _VALID_BACKENDS:
         raise ValueError(
             f"unknown SENTIMENT_BACKEND={backend!r}; expected one of {_VALID_BACKENDS}"
         )
     if backend == "stub":
-        return StubClassifier()
+        return StubClassifier(), None
+    requested_version = os.environ.get("MODEL_VERSION")
+    tracking_uri = os.environ.get("MLFLOW_TRACKING_URI", "file:./mlruns")
     if backend == "catboost":
-        model_dir = Path(os.environ.get("CATBOOST_MODEL_DIR", _DEFAULT_CATBOOST_DIR)).resolve()
-        return CatBoostAdapter(model_dir=model_dir)
-    model_dir = Path(os.environ.get("LORA_MODEL_DIR", _DEFAULT_LORA_DIR)).resolve()
-    return AraBERTLoRAAdapter(model_dir=model_dir)
+        fallback_dir = Path(os.environ.get("CATBOOST_MODEL_DIR", _DEFAULT_CATBOOST_DIR)).resolve()
+        return load_from_registry_or_fallback(
+            backend="catboost",
+            fallback_dir=fallback_dir,
+            requested_version=requested_version,
+            tracking_uri=tracking_uri,
+        )
+    fallback_dir = Path(os.environ.get("LORA_MODEL_DIR", _DEFAULT_LORA_DIR)).resolve()
+    return load_from_registry_or_fallback(
+        backend="lora",
+        fallback_dir=fallback_dir,
+        requested_version=requested_version,
+        tracking_uri=tracking_uri,
+    )
 
 
 def _load_reference(
@@ -79,19 +97,17 @@ def _load_reference(
 ) -> tuple[
     dict[Sentiment, float] | None,
     dict[str, float] | None,
-    dict[str, str] | None,
 ]:
     report_path = reports_dir / f"{backend_name}.json"
     if not report_path.is_file():
         logger.info("reference missing: %s (file not found)", report_path)
-        return None, None, None
+        return None, None
     with report_path.open("r", encoding="utf-8") as fh:
         report = json.load(fh)
 
     pred_ref = _extract_predicted_class_reference(report, report_path)
     conf_ref = _extract_confidence_reference(report, report_path)
-    model_version = _extract_model_version(report, report_path)
-    return pred_ref, conf_ref, model_version
+    return pred_ref, conf_ref
 
 
 def _extract_predicted_class_reference(
@@ -120,23 +136,12 @@ def _extract_confidence_reference(
     return None
 
 
-def _extract_model_version(report: dict[str, object], report_path: Path) -> dict[str, str] | None:
-    try:
-        registry = report["registry"]
-        return {
-            "name": str(registry["name"]),  # type: ignore[index]
-            "version": str(registry["version"]),  # type: ignore[index]
-            "run_id": str(registry["run_id"]),  # type: ignore[index]
-        }
-    except (KeyError, TypeError, ValueError):
-        logger.info("reference missing: registry block in %s", report_path)
-        return None
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     backend = os.environ.get("SENTIMENT_BACKEND", "stub")
-    app.state.classifier = _build_classifier(backend)
+    classifier, version_info = _build_classifier(backend)
+    app.state.classifier = classifier
+    app.state.model_version = version_info
     app.state.backend_name = _BACKEND_NAMES[backend]
 
     raw_size = os.environ.get("DRIFT_BUFFER_SIZE")
@@ -150,11 +155,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     if backend == "stub":
         app.state.drift_monitor = None
-        app.state.model_version = None
         logger.info("drift backend=stub — monitor disabled")
     else:
-        pred_ref, conf_ref, model_version = _load_reference(app.state.backend_name, reports_dir)
-        app.state.model_version = model_version
+        pred_ref, conf_ref = _load_reference(app.state.backend_name, reports_dir)
         app.state.drift_monitor = InMemoryDriftMonitor(
             backend_name=app.state.backend_name,
             predicted_class_reference=pred_ref,
@@ -162,13 +165,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             buffer_size=buffer_size,
             minimum_count=_MINIMUM_COUNT,
         )
+        mv_label = (
+            f"{version_info.name}/{version_info.version}" if version_info else "filesystem-fallback"
+        )
         logger.info(
-            "drift backend=%s buffer_size=%d minimum_count=%d pred_ref=%s conf_ref=%s",
+            "drift backend=%s buffer_size=%d minimum_count=%d pred_ref=%s conf_ref=%s mv=%s",
             app.state.backend_name,
             buffer_size,
             _MINIMUM_COUNT,
             "loaded" if pred_ref else "missing",
             "loaded" if conf_ref else "missing",
+            mv_label,
         )
     yield
 
@@ -227,10 +234,11 @@ def create_app() -> FastAPI:
 
     @app.get("/health")
     def health(request: Request) -> dict[str, object]:
+        version_info: RegistryVersionInfo | None = request.app.state.model_version
         return {
             "status": "ok",
             "model": request.app.state.backend_name,
-            "model_version": request.app.state.model_version,
+            "model_version": dataclasses.asdict(version_info) if version_info else None,
         }
 
     @app.post("/predict", response_model=PredictResponse)
