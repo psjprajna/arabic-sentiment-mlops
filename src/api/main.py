@@ -76,17 +76,22 @@ def _build_classifier(backend: str) -> SentimentClassifierPort:
 
 def _load_reference(
     backend_name: str, reports_dir: Path
-) -> tuple[dict[Sentiment, float] | None, dict[str, float] | None]:
+) -> tuple[
+    dict[Sentiment, float] | None,
+    dict[str, float] | None,
+    dict[str, str] | None,
+]:
     report_path = reports_dir / f"{backend_name}.json"
     if not report_path.is_file():
         logger.info("reference missing: %s (file not found)", report_path)
-        return None, None
+        return None, None, None
     with report_path.open("r", encoding="utf-8") as fh:
         report = json.load(fh)
 
     pred_ref = _extract_predicted_class_reference(report, report_path)
     conf_ref = _extract_confidence_reference(report, report_path)
-    return pred_ref, conf_ref
+    model_version = _extract_model_version(report, report_path)
+    return pred_ref, conf_ref, model_version
 
 
 def _extract_predicted_class_reference(
@@ -115,6 +120,19 @@ def _extract_confidence_reference(
     return None
 
 
+def _extract_model_version(report: dict[str, object], report_path: Path) -> dict[str, str] | None:
+    try:
+        registry = report["registry"]
+        return {
+            "name": str(registry["name"]),  # type: ignore[index]
+            "version": str(registry["version"]),  # type: ignore[index]
+            "run_id": str(registry["run_id"]),  # type: ignore[index]
+        }
+    except (KeyError, TypeError, ValueError):
+        logger.info("reference missing: registry block in %s", report_path)
+        return None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     backend = os.environ.get("SENTIMENT_BACKEND", "stub")
@@ -132,9 +150,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     if backend == "stub":
         app.state.drift_monitor = None
+        app.state.model_version = None
         logger.info("drift backend=stub — monitor disabled")
     else:
-        pred_ref, conf_ref = _load_reference(app.state.backend_name, reports_dir)
+        pred_ref, conf_ref, model_version = _load_reference(app.state.backend_name, reports_dir)
+        app.state.model_version = model_version
         app.state.drift_monitor = InMemoryDriftMonitor(
             backend_name=app.state.backend_name,
             predicted_class_reference=pred_ref,
@@ -200,14 +220,18 @@ def _drift_report_to_dict(report: DriftReport) -> dict[str, object]:
 def create_app() -> FastAPI:
     app = FastAPI(
         title="Arabic Sentiment MLOps",
-        version="0.4.0",
+        version="0.5.0",
         description="Sentiment analysis for Arabic text (UAE dialect + MSA).",
         lifespan=lifespan,
     )
 
     @app.get("/health")
-    def health(request: Request) -> dict[str, str]:
-        return {"status": "ok", "model": request.app.state.backend_name}
+    def health(request: Request) -> dict[str, object]:
+        return {
+            "status": "ok",
+            "model": request.app.state.backend_name,
+            "model_version": request.app.state.model_version,
+        }
 
     @app.post("/predict", response_model=PredictResponse)
     def predict(
