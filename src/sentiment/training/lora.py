@@ -36,6 +36,7 @@ from transformers import (
 
 from sentiment.adapters.hard_dataset import DatasetSplits, Example, HARDDataset
 from sentiment.domain.models import Sentiment
+from sentiment.training.dialect_breakdown import compute_dialect_breakdown
 from sentiment.training.mlflow_logging import log_run
 
 _LABEL_ORDER: tuple[Sentiment, ...] = (
@@ -119,17 +120,17 @@ def _compute_metrics(eval_pred: tuple[np.ndarray, np.ndarray]) -> dict[str, floa
 
 def _evaluate_on_test(
     trainer: Trainer, test_dataset: HFDataset
-) -> tuple[dict[str, float], float, list[list[int]]]:
+) -> tuple[dict[str, float], float, list[list[int]], np.ndarray, np.ndarray]:
     output = trainer.predict(test_dataset)
     logits = output.predictions
-    labels = output.label_ids
-    preds = logits.argmax(axis=-1)
+    labels = np.asarray(output.label_ids).ravel()
+    preds = logits.argmax(axis=-1).ravel()
     label_ids = list(range(len(_LABEL_ORDER)))
     per_class = f1_score(labels, preds, labels=label_ids, average=None, zero_division=0.0)
     macro = float(f1_score(labels, preds, labels=label_ids, average="macro", zero_division=0.0))
     cm = confusion_matrix(labels, preds, labels=label_ids)
     per_class_dict = {_LABEL_ORDER[i].value: float(per_class[i]) for i in range(len(_LABEL_ORDER))}
-    return per_class_dict, macro, cm.astype(int).tolist()
+    return per_class_dict, macro, cm.astype(int).tolist(), preds, labels
 
 
 def _persist_lora_adapter(
@@ -242,9 +243,18 @@ def run_lora_training(
     )
     trainer.train()
 
-    per_class, macro, cm = _evaluate_on_test(trainer, test_ds)
+    per_class, macro, cm, preds, y_test = _evaluate_on_test(trainer, test_ds)
     baseline = _load_baseline_f1(baseline_report_path)
     delta = (macro - baseline) if baseline is not None else None
+
+    # Raw test text (diacritics preserved) for the dialect tagger —
+    # the HF dataset has tokenized away the original strings.
+    test_texts_raw = [ex.text for ex in splits.test]
+    dialect_breakdown = compute_dialect_breakdown(
+        texts=test_texts_raw,
+        y_true=y_test,
+        y_pred=preds,
+    )
 
     labels_str = [s.value for s in _LABEL_ORDER]
     report: dict[str, object] = {
@@ -277,6 +287,7 @@ def run_lora_training(
         "baseline_f1_macro": baseline,
         "delta_vs_baseline": delta,
         "trained_at": datetime.now(UTC).isoformat(),
+        "dialect_breakdown": dialect_breakdown,
     }
 
     _persist_lora_adapter(Path(model_dir), model, tokenizer, labels_str)
