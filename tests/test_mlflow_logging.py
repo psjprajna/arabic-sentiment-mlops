@@ -2,12 +2,24 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from pathlib import Path
 
 import mlflow
+import mlflow.pyfunc
+import pandas as pd
+import pytest
+from mlflow.tracking import MlflowClient
 
-from sentiment.training.mlflow_logging import log_run
+from sentiment.adapters.catboost_classifier import CatBoostAdapter
+from sentiment.adapters.hard_dataset import HARDDataset
+from sentiment.training.baseline import run_baseline
+from sentiment.training.mlflow_logging import (
+    SentimentPyfunc,
+    log_artifact_to_run,
+    log_run,
+)
 
 
 def _tracking_uri(tmp_path: Path) -> str:
@@ -16,6 +28,30 @@ def _tracking_uri(tmp_path: Path) -> str:
 
 def _unique_experiment(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex[:8]}"
+
+
+def _synthetic_rows(n_per_class: int = 20) -> list[tuple[str, int]]:
+    rows: list[tuple[str, int]] = []
+    for i in range(n_per_class):
+        rows.append((f"رائع ممتاز جدا الفندق نظيف الخدمة سريعة {i}", 5))
+        rows.append((f"سيء جدا قذر مزعج فظيع غير محترم {i}", 1))
+        rows.append((f"عادي مقبول لا بأس متوسط لا أكثر {i}", 3))
+    return rows
+
+
+def _build_catboost_fixture(tmp_path: Path) -> Path:
+    """Train a tiny CatBoost model and return its model_dir."""
+    splits = HARDDataset.from_rows(_synthetic_rows(20), seed=42)
+    model_dir = tmp_path / "cb"
+    report_path = tmp_path / "cb-report.json"
+    run_baseline(splits=splits, model_dir=model_dir, report_path=report_path)
+    return model_dir
+
+
+def _write_meta(tmp_path: Path, backend_type: str) -> Path:
+    meta = tmp_path / "pyfunc_meta.json"
+    meta.write_text(json.dumps({"backend_type": backend_type}), encoding="utf-8")
+    return meta
 
 
 def test_log_run_creates_experiment_and_run(tmp_path: Path) -> None:
@@ -99,3 +135,187 @@ def test_log_run_reuses_existing_experiment(tmp_path: Path) -> None:
     assert experiment is not None
     runs = mlflow.search_runs(experiment_ids=[experiment.experiment_id])
     assert len(runs) == 2
+
+
+# ---------------------------------------------------------------------------
+# Phase 6 — registry surfacing (SentimentPyfunc + register_as in log_run)
+# ---------------------------------------------------------------------------
+
+
+def test_log_run_registers_model_when_register_as_set(tmp_path: Path) -> None:
+    exp = _unique_experiment("register")
+    uri = _tracking_uri(tmp_path / "mlruns")
+    model_dir = _build_catboost_fixture(tmp_path)
+    meta = _write_meta(tmp_path, "catboost")
+    name = f"catboost-baseline-{uuid.uuid4().hex[:8]}"
+
+    result = log_run(
+        run_name="t-register",
+        params={"backend": "catboost"},
+        metrics={"f1_macro": 0.5},
+        artifact_paths=[],
+        experiment_name=exp,
+        tracking_uri=uri,
+        register_as=name,
+        python_model=SentimentPyfunc(),
+        artifacts={"backend_type": str(meta), "model_dir": str(model_dir)},
+    )
+
+    assert isinstance(result, dict)
+    assert set(result.keys()) == {
+        "name",
+        "version",
+        "run_id",
+        "model_uri",
+        "registered_at",
+    }
+    assert result["name"] == name
+    assert result["version"] == "1"
+    assert result["model_uri"] == f"runs:/{result['run_id']}/model"
+
+    client = MlflowClient(tracking_uri=uri)
+    assert client.get_registered_model(name) is not None
+    versions = client.search_model_versions(f"name='{name}'")
+    assert len(versions) == 1
+
+
+def test_log_run_increments_version_on_second_call(tmp_path: Path) -> None:
+    exp = _unique_experiment("incr")
+    uri = _tracking_uri(tmp_path / "mlruns")
+    model_dir = _build_catboost_fixture(tmp_path)
+    meta = _write_meta(tmp_path, "catboost")
+    name = f"catboost-baseline-{uuid.uuid4().hex[:8]}"
+
+    common = dict(
+        run_name="t-incr",
+        params={"backend": "catboost"},
+        metrics={"f1_macro": 0.5},
+        artifact_paths=[],
+        experiment_name=exp,
+        tracking_uri=uri,
+        register_as=name,
+        python_model=SentimentPyfunc(),
+        artifacts={"backend_type": str(meta), "model_dir": str(model_dir)},
+    )
+
+    first = log_run(**common)
+    second = log_run(**common)
+
+    assert isinstance(first, dict)
+    assert isinstance(second, dict)
+    assert first["version"] == "1"
+    assert second["version"] == "2"
+
+    client = MlflowClient(tracking_uri=uri)
+    versions = client.search_model_versions(f"name='{name}'")
+    assert len(versions) == 2
+
+
+def test_log_run_backward_compatible_when_register_as_none(tmp_path: Path) -> None:
+    exp = _unique_experiment("compat")
+    result = log_run(
+        run_name="t-compat",
+        params={"a": 1},
+        metrics={"f1": 0.5},
+        artifact_paths=[],
+        experiment_name=exp,
+        tracking_uri=_tracking_uri(tmp_path),
+    )
+    assert isinstance(result, str)
+
+
+@pytest.mark.parametrize(
+    ("python_model", "artifacts"),
+    [
+        (None, {"backend_type": "x", "model_dir": "y"}),
+        (SentimentPyfunc(), None),
+        (None, None),
+    ],
+)
+def test_log_run_validates_register_args(
+    tmp_path: Path,
+    python_model: mlflow.pyfunc.PythonModel | None,
+    artifacts: dict[str, str] | None,
+) -> None:
+    exp = _unique_experiment("validate")
+    uri = _tracking_uri(tmp_path / "mlruns")
+
+    with pytest.raises(ValueError):
+        log_run(
+            run_name="t-validate",
+            params={},
+            metrics={},
+            artifact_paths=[],
+            experiment_name=exp,
+            tracking_uri=uri,
+            register_as="some-name",
+            python_model=python_model,
+            artifacts=artifacts,
+        )
+
+    # No MLflow side effect before the raise.
+    mlflow.set_tracking_uri(uri)
+    experiment = mlflow.get_experiment_by_name(exp)
+    if experiment is not None:
+        runs = mlflow.search_runs(experiment_ids=[experiment.experiment_id])
+        assert len(runs) == 0
+
+
+def test_pyfunc_roundtrip_predictions_match_inprocess_classifier(
+    tmp_path: Path,
+) -> None:
+    exp = _unique_experiment("roundtrip")
+    uri = _tracking_uri(tmp_path / "mlruns")
+    model_dir = _build_catboost_fixture(tmp_path)
+    meta = _write_meta(tmp_path, "catboost")
+    name = f"catboost-baseline-{uuid.uuid4().hex[:8]}"
+
+    sentences = ["الفندق ممتاز", "الخدمة سيئة جداً", "الموقع عادي"]
+
+    adapter = CatBoostAdapter(model_dir=model_dir)
+    expected = [adapter.predict(s).sentiment.value for s in sentences]
+
+    result = log_run(
+        run_name="t-roundtrip",
+        params={"backend": "catboost"},
+        metrics={"f1_macro": 0.5},
+        artifact_paths=[],
+        experiment_name=exp,
+        tracking_uri=uri,
+        register_as=name,
+        python_model=SentimentPyfunc(),
+        artifacts={"backend_type": str(meta), "model_dir": str(model_dir)},
+    )
+    assert isinstance(result, dict)
+
+    mlflow.set_tracking_uri(uri)
+    loaded = mlflow.pyfunc.load_model(result["model_uri"])
+    df = loaded.predict(pd.DataFrame({"text": sentences}))
+
+    assert list(df["sentiment"]) == expected
+    schema = loaded.metadata.get_input_schema()
+    assert schema is not None
+    input_cols = schema.input_names()
+    assert input_cols == ["text"]
+
+
+def test_log_artifact_to_run_attaches_file_to_existing_run(tmp_path: Path) -> None:
+    exp = _unique_experiment("attach")
+    uri = _tracking_uri(tmp_path / "mlruns")
+    run_id = log_run(
+        run_name="t-attach",
+        params={},
+        metrics={},
+        artifact_paths=[],
+        experiment_name=exp,
+        tracking_uri=uri,
+    )
+    assert isinstance(run_id, str)
+
+    artifact = tmp_path / "after.json"
+    artifact.write_text(json.dumps({"hello": "world"}), encoding="utf-8")
+    log_artifact_to_run(run_id=run_id, tracking_uri=uri, path=artifact)
+
+    client = MlflowClient(tracking_uri=uri)
+    names = {a.path for a in client.list_artifacts(run_id)}
+    assert "after.json" in names
