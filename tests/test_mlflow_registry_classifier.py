@@ -125,7 +125,7 @@ def test_adapter_loads_specific_version(monkeypatch: pytest.MonkeyPatch) -> None
         registry_name="catboost-baseline",
         version="3",
         run_id="run-3",
-        tracking_uri="file:./mlruns",
+        tracking_uri="sqlite:///mlflow.db",
     )
 
     assert uris == ["models:/catboost-baseline/3"]

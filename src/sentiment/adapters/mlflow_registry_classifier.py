@@ -58,7 +58,7 @@ class MLflowRegistryAdapter(SentimentClassifierPort):
         registry_name: str,
         version: str,
         run_id: str,
-        tracking_uri: str = "file:./mlruns",
+        tracking_uri: str = "sqlite:///mlflow.db",
     ) -> None:
         mlflow.set_tracking_uri(tracking_uri)
         model_uri = f"models:/{registry_name}/{version}"
@@ -128,7 +128,7 @@ def load_from_registry_or_fallback(
     backend: Literal["catboost", "lora"],
     fallback_dir: Path,
     requested_version: str | None,
-    tracking_uri: str = "file:./mlruns",
+    tracking_uri: str = "sqlite:///mlflow.db",
 ) -> tuple[SentimentClassifierPort, RegistryVersionInfo | None]:
     """Return ``(adapter, version_info)`` from the registry, else filesystem.
 

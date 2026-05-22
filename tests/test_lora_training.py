@@ -157,7 +157,7 @@ def test_run_lora_training_writes_artifacts(tmp_path: Path, _patched: dict[str, 
         model_dir=model_dir,
         report_path=report_path,
         n_train_subsample=30,
-        mlflow_tracking_uri=f"file:{tmp_path}/mlruns",
+        mlflow_tracking_uri=f"sqlite:///{tmp_path}/mlflow.db",
     )
 
     assert (model_dir / "adapter_config.json").exists()
@@ -181,7 +181,7 @@ def test_run_lora_training_report_schema(tmp_path: Path, _patched: dict[str, Any
         model_dir=model_dir,
         report_path=report_path,
         n_train_subsample=30,
-        mlflow_tracking_uri=f"file:{tmp_path}/mlruns",
+        mlflow_tracking_uri=f"sqlite:///{tmp_path}/mlflow.db",
     )
 
     parsed = json.loads(report_path.read_text(encoding="utf-8"))
@@ -220,7 +220,7 @@ def test_run_lora_training_calls_mlflow(tmp_path: Path, _patched: dict[str, Any]
         model_dir=tmp_path / "lora",
         report_path=tmp_path / "lora-report.json",
         n_train_subsample=30,
-        mlflow_tracking_uri=f"file:{tmp_path}/mlruns",
+        mlflow_tracking_uri=f"sqlite:///{tmp_path}/mlflow.db",
     )
 
     captured = _patched["captured_log"]
@@ -270,7 +270,7 @@ def test_run_lora_training_report_includes_dialect_breakdown(
         model_dir=tmp_path / "lora",
         report_path=tmp_path / "lora-report.json",
         n_train_subsample=30,
-        mlflow_tracking_uri=f"file:{tmp_path}/mlruns",
+        mlflow_tracking_uri=f"sqlite:///{tmp_path}/mlflow.db",
     )
 
     assert "dialect_breakdown" in report
@@ -304,7 +304,7 @@ def test_run_lora_training_subsamples_train_split(tmp_path: Path, _patched: dict
         model_dir=tmp_path / "lora",
         report_path=tmp_path / "lora-report.json",
         n_train_subsample=50,
-        mlflow_tracking_uri=f"file:{tmp_path}/mlruns",
+        mlflow_tracking_uri=f"sqlite:///{tmp_path}/mlflow.db",
     )
 
     captured = _patched["captured_log"][0]
@@ -353,7 +353,7 @@ def test_lora_report_includes_registry_block(tmp_path: Path, _patched: dict[str,
         model_dir=tmp_path / "lora",
         report_path=report_path,
         n_train_subsample=30,
-        mlflow_tracking_uri=f"file:{tmp_path}/mlruns",
+        mlflow_tracking_uri=f"sqlite:///{tmp_path}/mlflow.db",
     )
 
     parsed = json.loads(report_path.read_text(encoding="utf-8"))
@@ -383,7 +383,7 @@ def test_lora_registry_version_increments_on_second_call(
         model_dir=tmp_path / "lora",
         report_path=tmp_path / "lora-report.json",
         n_train_subsample=30,
-        mlflow_tracking_uri=f"file:{tmp_path}/mlruns",
+        mlflow_tracking_uri=f"sqlite:///{tmp_path}/mlflow.db",
     )
 
     first = run_lora_training(**common)
@@ -406,7 +406,7 @@ def test_lora_report_artifact_attached_to_mlflow_run(
         model_dir=tmp_path / "lora",
         report_path=report_path,
         n_train_subsample=30,
-        mlflow_tracking_uri=f"file:{tmp_path}/mlruns",
+        mlflow_tracking_uri=f"sqlite:///{tmp_path}/mlflow.db",
     )
 
     attached = _patched["captured_attach"]

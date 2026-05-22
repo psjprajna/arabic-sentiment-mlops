@@ -99,8 +99,8 @@ signature.
 | Env var                | Values                        | Default                          | Purpose                                                                              |
 |------------------------|-------------------------------|----------------------------------|--------------------------------------------------------------------------------------|
 | `SENTIMENT_BACKEND`    | `stub` / `catboost` / `lora`  | `stub`                           | Picks the active classifier                                                          |
-| `MODEL_VERSION`        | string (e.g. `"3"`)           | latest non-archived              | Phase 7 — pins a specific MLflow Model Registry version; unset → resolve latest      |
-| `MLFLOW_TRACKING_URI`  | URI                           | `file:./mlruns`                  | Phase 7 — registry backend; defaults to local file store per ADR-0003                |
+| `MODEL_VERSION`        | string (e.g. `"10"`)          | latest non-archived              | Phase 7 — pins a specific MLflow Model Registry version; unset → resolve latest      |
+| `MLFLOW_TRACKING_URI`  | URI                           | `sqlite:///mlflow.db`            | Phase 8 — SQLite-backed registry per ADR-0005 (supersedes ADR-0003's file:// default)|
 | `LORA_MODEL_DIR`       | path                          | `models/arabert-lora-v1`         | Filesystem fallback when the registry path fails (empty `mlruns/`, MlflowException)  |
 | `CATBOOST_MODEL_DIR`   | path                          | `models/catboost-baseline-v1`    | Filesystem fallback when the registry path fails                                     |
 | `DRIFT_BUFFER_SIZE`    | int ≥ 1                       | `1000`                           | Drift ring-buffer capacity                                                           |
@@ -110,11 +110,12 @@ signature.
 # Serve the latest registered LoRA version (resolved from the registry at startup)
 SENTIMENT_BACKEND=lora uv run uvicorn api.main:app --port 8000
 
-# Pin to a specific registered version
-SENTIMENT_BACKEND=catboost MODEL_VERSION=3 uv run uvicorn api.main:app --port 8000
+# Pin to a specific registered version (recommended for production —
+# the test-pollution registered v11 means DESC default doesn't serve v10)
+SENTIMENT_BACKEND=catboost MODEL_VERSION=10 uv run uvicorn api.main:app --port 8000
 
 # Force the filesystem fallback path (empty registry → falls back to *_MODEL_DIR)
-MLFLOW_TRACKING_URI=file:///tmp/empty-mlruns \
+MLFLOW_TRACKING_URI=sqlite:////tmp/empty.db \
   SENTIMENT_BACKEND=catboost \
   CATBOOST_MODEL_DIR=models/catboost-baseline-v1 \
   uv run uvicorn api.main:app --port 8000
@@ -148,18 +149,20 @@ report-file extraction that previously fed `/health` is gone; the
 loader is the single source-of-truth.
 
 ```bash
-# Latest registered LoRA version (resolved at startup):
+# Latest registered LoRA version (resolved at startup; LoRA registry is clean):
 SENTIMENT_BACKEND=lora uv run uvicorn api.main:app --port 8000 &
 curl -s http://localhost:8000/health | jq .model_version
-# {"name":"arabert-lora","version":"1","run_id":"fdf6edb2…","source":"registry"}
+# {"name":"arabert-lora","version":"1","run_id":"94cccbd9…","source":"registry"}
 
-# Pin a specific version:
-SENTIMENT_BACKEND=catboost MODEL_VERSION=11 uv run uvicorn api.main:app --port 8000 &
+# CatBoost — pin v10 (the production retrain) explicitly; DESC default
+# resolves to v11 due to a documented test-pollution path (see lessons.md
+# 2026-05-22 | testing and ADR-0005 consequences):
+SENTIMENT_BACKEND=catboost MODEL_VERSION=10 uv run uvicorn api.main:app --port 8000 &
 curl -s http://localhost:8000/health | jq .model_version
-# {"name":"catboost-baseline","version":"11","run_id":"16dede45…","source":"registry"}
+# {"name":"catboost-baseline","version":"10","run_id":"609e3412…","source":"registry"}
 
-# Forced fallback (empty registry):
-MLFLOW_TRACKING_URI=file:///tmp/empty-mlruns SENTIMENT_BACKEND=catboost \
+# Forced fallback (registry unreachable → *_MODEL_DIR filesystem path):
+MLFLOW_TRACKING_URI=sqlite:////tmp/empty.db SENTIMENT_BACKEND=catboost \
   uv run uvicorn api.main:app --port 8000 &
 curl -s http://localhost:8000/health | jq .model_version
 # null   — WARNING logged: "registry load failed … using filesystem fallback"
@@ -168,9 +171,33 @@ curl -s http://localhost:8000/health | jq .model_version
 The hexagonal boundary is preserved: `api/main.py` no longer imports
 concrete adapters; the only serving-side `mlflow` import lives in
 `sentiment/adapters/mlflow_registry_classifier.py`. `test_fitness.py`
-still passes. **219 tests green.** SQLite migration off the deprecated
-`file://` registry backend is deferred (separate ADR / phase) — the
-MLflow 3.12 `FutureWarning` is the lead indicator.
+still passes. **220 tests green** (post-Phase-8). SQLite-backed MLflow
+metadata has retired the Phase-7 `file://` deprecation warning — see
+Phase 8 below.
+
+**Phase 8 — SQLite registry migration.** Default `MLFLOW_TRACKING_URI`
+flips from `file:./mlruns` to `sqlite:///mlflow.db` (ADR-0005, supersedes
+ADR-0003's deferred position). Both backends retrained against the new
+backend; the Phase-4 `confidence_histogram` and Phase-5 `dialect_breakdown`
+fields are carried forward through the retrain. CatBoost macro-F1 stayed
+at **0.7648** (deterministic backend, byte-identical); LoRA macro-F1
+landed at **0.8377** (within the ±0.005 MPS noise band, above the
+Phase-2 0.83 acceptance bar). The two `FutureWarning`s for the
+filesystem tracking/registry backend are gone (0 of 0 across the test
+suite). `app/mlruns/` (575 MB) and `app/reports/` were archived to
+`*-legacy.bak/` before the cutover; both stay on the local filesystem
+as the rollback path until container deploy ships.
+
+Known test-pollution path: `tests/test_mlflow_logging.py::_build_catboost_fixture`
+calls `run_baseline(...)` without passing `mlflow_tracking_uri=`, so
+test-time fixture builds register `catboost-baseline` versions against
+the production `app/mlflow.db`. Under the file backend this wrote into
+the gitignored `app/mlruns/` (invisible); under SQLite it accumulates
+in a single file. `catboost-baseline` v1–v9 are pre-retrain pollution;
+v10 is the Step-2 production retrain; v11 is a diagnostic registration
+created during investigation. DESC resolution defaults to v11 — set
+`MODEL_VERSION=10` for production-grade serving. Full root cause in
+`.claude/tasks/lessons.md` 2026-05-22 | testing.
 
 **Phase 6 — MLflow Model Registry versioning.** Every retrain of either
 backend registers a new version into the local Model Registry
@@ -181,10 +208,10 @@ time. Each backend's report JSON carries a top-level `registry` block —
 state is the source Phase 7 reads from. Current versions on the
 development tree:
 
-| Backend            | Version | Run ID prefix | Notes                              |
-|--------------------|--------:|---------------|------------------------------------|
-| `catboost-baseline`| `"11"`  | `16dede45…`   | 9 stale versions from pre-isolation tests; the registration path itself is unchanged |
-| `arabert-lora`     | `"1"`   | `fdf6edb2…`   | First registration                 |
+| Backend            | Production Version | Run ID prefix | Notes                              |
+|--------------------|-------------------:|---------------|------------------------------------|
+| `catboost-baseline`| `"10"` (pin via `MODEL_VERSION=10`) | `609e3412…` | v1–v9 fixture pollution + v11 diagnostic; v10 is the Step-2 retrain — see Phase 8 |
+| `arabert-lora`     | `"1"`              | `94cccbd9…`   | Clean registry; DESC resolves correctly |
 
 ```bash
 # Inspect via UI:
@@ -266,4 +293,7 @@ Roadmap:
 - ~~**Phase 5**~~ — Gulf vs. MSA dialect breakdown (lexicon-v1 tagger, both backends, real numbers in `reports/`). ✅
 - ~~**Phase 6**~~ — MLflow Model Registry versioning; `/health` surfaces `model_version`; carry-forward of Phase-4/5 fields across retrains. ✅
 - ~~**Phase 7**~~ — Registry-resolved serving (load via `models:/<name>/<version>`); `MODEL_VERSION` env var; filesystem fallback for offline dev; `/health.model_version` reflects what is loaded. ✅
-- **Phase 8** — SQLite migration off the deprecated `file://` registry backend; auto-retraining trigger on PSI drift signals; Azure Container Apps deployment (UAE North).
+- ~~**Phase 8**~~ — SQLite migration off the deprecated `file://` registry backend (`sqlite:///mlflow.db` default; ADR-0005). ✅
+- **Phase 9** — Auto-retraining trigger on PSI drift signals.
+- **Phase 10** — Container deploy (Azure Container Apps if free-tier credits cover it at $0; Hugging Face Spaces Docker SDK otherwise).
+- **Phase 11** — Streamlit demo + ops UI (Try-it + Behind-the-scenes tabs).

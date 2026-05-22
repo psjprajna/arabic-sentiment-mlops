@@ -28,7 +28,7 @@ import pandas as pd
 from mlflow.tracking import MlflowClient
 
 _DEFAULT_EXPERIMENT = "arabic-sentiment"
-_DEFAULT_TRACKING_URI = "file:./mlruns"
+_DEFAULT_TRACKING_URI = "sqlite:///mlflow.db"
 
 
 class SentimentPyfunc(mlflow.pyfunc.PythonModel):

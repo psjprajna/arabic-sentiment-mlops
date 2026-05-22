@@ -1,4 +1,4 @@
-"""Tests for the mlflow_logging.log_run helper (file-backed tracking)."""
+"""Tests for the mlflow_logging.log_run helper (SQLite-backed tracking)."""
 
 from __future__ import annotations
 
@@ -23,7 +23,8 @@ from sentiment.training.mlflow_logging import (
 
 
 def _tracking_uri(tmp_path: Path) -> str:
-    return f"file:{tmp_path}"
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    return f"sqlite:///{tmp_path}/mlflow.db"
 
 
 def _unique_experiment(prefix: str) -> str:
@@ -319,3 +320,31 @@ def test_log_artifact_to_run_attaches_file_to_existing_run(tmp_path: Path) -> No
     client = MlflowClient(tracking_uri=uri)
     names = {a.path for a in client.list_artifacts(run_id)}
     assert "after.json" in names
+
+
+def test_default_tracking_uri_is_sqlite_across_modules() -> None:
+    import inspect
+
+    from sentiment.adapters.mlflow_registry_classifier import (
+        MLflowRegistryAdapter,
+        load_from_registry_or_fallback,
+    )
+    from sentiment.training import baseline, lora
+    from sentiment.training import mlflow_logging as ml_logging
+
+    expected = "sqlite:///mlflow.db"
+
+    assert ml_logging._DEFAULT_TRACKING_URI == expected
+    assert baseline._DEFAULT_TRACKING_URI == expected
+    assert lora._DEFAULT_TRACKING_URI == expected
+
+    adapter_sig = inspect.signature(MLflowRegistryAdapter.__init__)
+    assert adapter_sig.parameters["tracking_uri"].default == expected
+
+    loader_sig = inspect.signature(load_from_registry_or_fallback)
+    assert loader_sig.parameters["tracking_uri"].default == expected
+
+    api_main_path = Path(__file__).parent.parent / "src" / "api" / "main.py"
+    api_main_src = api_main_path.read_text(encoding="utf-8")
+    assert f'"{expected}"' in api_main_src
+    assert '"file:./mlruns"' not in api_main_src

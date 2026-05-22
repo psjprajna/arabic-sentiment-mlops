@@ -1,0 +1,92 @@
+{
+  "captured_at": "2026-05-22",
+  "phase": "phase-08-sqlite-registry-migration",
+  "note": "DESC default resolves catboost-baseline to v11 (a test-fixture model created during diagnostic investigation of the v1-v9 test pollution documented in lessons.md 2026-05-22 | testing). The legit Step-2 retrain is v10. For production-grade serving set MODEL_VERSION=10. LoRA has no equivalent pollution; DESC resolves cleanly to v1.",
+  "smoke": [
+    {
+      "label": "catboost_via_registry_DESC_default",
+      "env": {
+        "SENTIMENT_BACKEND": "catboost",
+        "MLFLOW_TRACKING_URI": null,
+        "MODEL_VERSION": null
+      },
+      "status_code": 200,
+      "body": {
+        "status": "ok",
+        "model": "catboost-baseline-v1",
+        "model_version": {
+          "name": "catboost-baseline",
+          "version": "11",
+          "run_id": "7fa5cadd082a40b7bda623fcf46fe9fb",
+          "source": "registry"
+        }
+      }
+    },
+    {
+      "label": "catboost_via_registry_pinned_v10_PRODUCTION",
+      "env": {
+        "SENTIMENT_BACKEND": "catboost",
+        "MLFLOW_TRACKING_URI": null,
+        "MODEL_VERSION": "10"
+      },
+      "status_code": 200,
+      "body": {
+        "status": "ok",
+        "model": "catboost-baseline-v1",
+        "model_version": {
+          "name": "catboost-baseline",
+          "version": "10",
+          "run_id": "609e3412f16d4fdfb5b598ae14350f20",
+          "source": "registry"
+        }
+      }
+    },
+    {
+      "label": "lora_via_registry",
+      "env": {
+        "SENTIMENT_BACKEND": "lora",
+        "MLFLOW_TRACKING_URI": null,
+        "MODEL_VERSION": null
+      },
+      "status_code": 200,
+      "body": {
+        "status": "ok",
+        "model": "arabert-lora-v1",
+        "model_version": {
+          "name": "arabert-lora",
+          "version": "1",
+          "run_id": "94cccbd929a845dd9e47d46a5c3db759",
+          "source": "registry"
+        }
+      }
+    },
+    {
+      "label": "stub_no_registry",
+      "env": {
+        "SENTIMENT_BACKEND": "stub",
+        "MLFLOW_TRACKING_URI": null,
+        "MODEL_VERSION": null
+      },
+      "status_code": 200,
+      "body": {
+        "status": "ok",
+        "model": "stub",
+        "model_version": null
+      }
+    },
+    {
+      "label": "catboost_filesystem_fallback_on_bogus_uri",
+      "env": {
+        "SENTIMENT_BACKEND": "catboost",
+        "MLFLOW_TRACKING_URI": "sqlite:////nonexistent/bogus.db",
+        "MODEL_VERSION": null
+      },
+      "status_code": 200,
+      "body": {
+        "status": "ok",
+        "model": "catboost-baseline-v1",
+        "model_version": null
+      }
+    }
+  ]
+}
