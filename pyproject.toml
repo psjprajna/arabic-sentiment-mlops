@@ -52,3 +52,17 @@ select = ["E", "F", "I", "N", "UP"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+
+# Force the CPU-only torch wheel on Linux (the container target). On macOS
+# arm64 the standard PyPI wheel already ships CPU+MPS, so PyPI stays as the
+# source there. This avoids pulling ~6 GB of CUDA kernels into the runtime
+# image — Hugging Face Spaces' free CPU tier never uses them.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", marker = "sys_platform == 'linux'" },
+]
