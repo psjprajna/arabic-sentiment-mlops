@@ -10,6 +10,12 @@ pinned: false
 
 # Arabic Sentiment Analysis
 
+**Live demo:** https://prajnashetty-arabic-sentiment-lora.hf.space — `GET /health` and
+`POST /predict` with the AraBERT LoRA backend, served on Hugging Face Spaces' free
+Docker SDK ($0 always-on). Bundle pulled at build time from
+[`PrajnaShetty/arabic-sentiment-lora-deploy`](https://huggingface.co/PrajnaShetty/arabic-sentiment-lora-deploy);
+see the [Deploy section](#deploy-to-hugging-face-spaces) for the recipe.
+
 A FastAPI service that classifies Arabic text — Modern Standard Arabic (MSA) and Gulf /
 Emirati dialect — as **positive**, **negative**, or **neutral**, with two interchangeable
 model backends sitting behind a single port: a fast **CatBoost + TF-IDF** baseline and an
