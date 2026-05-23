@@ -40,12 +40,23 @@ def _synthetic_rows(n_per_class: int = 20) -> list[tuple[str, int]]:
     return rows
 
 
-def _build_catboost_fixture(tmp_path: Path) -> Path:
-    """Train a tiny CatBoost model and return its model_dir."""
+def _build_catboost_fixture(tmp_path: Path, *, tracking_uri: str) -> Path:
+    """Train a tiny CatBoost model and return its model_dir.
+
+    ``tracking_uri`` is forwarded to ``run_baseline`` so the inner
+    MLflow registration lands in the caller's per-test sqlite db
+    rather than the project default (Phase 9 Step 0: lessons.md
+    2026-05-22 | testing).
+    """
     splits = HARDDataset.from_rows(_synthetic_rows(20), seed=42)
     model_dir = tmp_path / "cb"
     report_path = tmp_path / "cb-report.json"
-    run_baseline(splits=splits, model_dir=model_dir, report_path=report_path)
+    run_baseline(
+        splits=splits,
+        model_dir=model_dir,
+        report_path=report_path,
+        mlflow_tracking_uri=tracking_uri,
+    )
     return model_dir
 
 
@@ -146,7 +157,7 @@ def test_log_run_reuses_existing_experiment(tmp_path: Path) -> None:
 def test_log_run_registers_model_when_register_as_set(tmp_path: Path) -> None:
     exp = _unique_experiment("register")
     uri = _tracking_uri(tmp_path / "mlruns")
-    model_dir = _build_catboost_fixture(tmp_path)
+    model_dir = _build_catboost_fixture(tmp_path, tracking_uri=uri)
     meta = _write_meta(tmp_path, "catboost")
     name = f"catboost-baseline-{uuid.uuid4().hex[:8]}"
 
@@ -183,7 +194,7 @@ def test_log_run_registers_model_when_register_as_set(tmp_path: Path) -> None:
 def test_log_run_increments_version_on_second_call(tmp_path: Path) -> None:
     exp = _unique_experiment("incr")
     uri = _tracking_uri(tmp_path / "mlruns")
-    model_dir = _build_catboost_fixture(tmp_path)
+    model_dir = _build_catboost_fixture(tmp_path, tracking_uri=uri)
     meta = _write_meta(tmp_path, "catboost")
     name = f"catboost-baseline-{uuid.uuid4().hex[:8]}"
 
@@ -267,7 +278,7 @@ def test_pyfunc_roundtrip_predictions_match_inprocess_classifier(
 ) -> None:
     exp = _unique_experiment("roundtrip")
     uri = _tracking_uri(tmp_path / "mlruns")
-    model_dir = _build_catboost_fixture(tmp_path)
+    model_dir = _build_catboost_fixture(tmp_path, tracking_uri=uri)
     meta = _write_meta(tmp_path, "catboost")
     name = f"catboost-baseline-{uuid.uuid4().hex[:8]}"
 
