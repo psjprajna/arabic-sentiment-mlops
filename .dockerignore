@@ -1,0 +1,41 @@
+# Build-context exclusions for the runtime image.
+# Keep the context small so HF Spaces builds stay fast.
+
+# MLflow state (filesystem fallback path is used in-container).
+mlruns/
+mlruns-legacy.bak/
+mlflow.db
+mlflow.db-journal
+
+# Training artefacts not part of the LoRA serving path.
+catboost_info/
+models/catboost-baseline-v1/
+
+# Datasets + reports stay out of the image; drift reference is not baked
+# in this slice (signals will be `reference_missing: true` at /metrics/drift).
+data/
+reports/
+reports-legacy.bak/
+
+# Tests and local docs.
+tests/
+docs/
+
+# Python build/run cruft.
+.venv/
+__pycache__/
+**/__pycache__/
+.pytest_cache/
+*.egg-info/
+.ruff_cache/
+
+# Git + IDE.
+.git/
+.gitignore
+.github/
+.vscode/
+.idea/
+
+# Container files (not needed inside the image itself).
+Dockerfile
+.dockerignore
