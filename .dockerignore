@@ -1,11 +1,21 @@
 # Build-context exclusions for the runtime image.
 # Keep the context small so HF Spaces builds stay fast.
 
-# MLflow state (filesystem fallback path is used in-container).
+# MLflow state. Phase 10b bakes mlflow.db plus ONE logged-model subtree
+# (the arabert-lora v1 pyfunc bundle, ~523 MB) so the in-container registry
+# resolves at startup and /health.model_version is populated. Everything
+# else under mlruns/ stays out of the image. The parent-walk negation is
+# required because .dockerignore does not recurse into an excluded dir.
 mlruns/
 mlruns-legacy.bak/
 mlflow.db
 mlflow.db-journal
+!mlflow.db
+!mlruns/
+!mlruns/1/
+!mlruns/1/models/
+!mlruns/1/models/m-f9cac40424504a5a91d9449f38f5bd7c/
+!mlruns/1/models/m-f9cac40424504a5a91d9449f38f5bd7c/**
 
 # Training artefacts not part of the LoRA serving path.
 catboost_info/
