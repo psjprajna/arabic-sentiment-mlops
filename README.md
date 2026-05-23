@@ -10,11 +10,18 @@ pinned: false
 
 # Arabic Sentiment Analysis
 
-**Live demo:** https://prajnashetty-arabic-sentiment-lora.hf.space — `GET /health` and
-`POST /predict` with the AraBERT LoRA backend, served on Hugging Face Spaces' free
-Docker SDK ($0 always-on). Bundle pulled at build time from
-[`PrajnaShetty/arabic-sentiment-lora-deploy`](https://huggingface.co/PrajnaShetty/arabic-sentiment-lora-deploy);
-see the [Deploy section](#deploy-to-hugging-face-spaces) for the recipe.
+**Live demo:** [`huggingface.co/spaces/PrajnaShetty/arabic-sentiment-lora`](https://huggingface.co/spaces/PrajnaShetty/arabic-sentiment-lora)
+— Space landing page renders this README + the running app in an iframe. The raw
+API endpoint is at
+[`prajnashetty-arabic-sentiment-lora.hf.space`](https://prajnashetty-arabic-sentiment-lora.hf.space) with
+[`/health`](https://prajnashetty-arabic-sentiment-lora.hf.space/health) (GET) and
+`/predict` (POST). Easiest way to exercise `/predict` from a browser is the
+auto-generated Swagger UI at
+[`/docs`](https://prajnashetty-arabic-sentiment-lora.hf.space/docs).
+A friendly browser UI ships in Phase 11 (Streamlit). Served on HF Spaces' free Docker
+SDK ($0 always-on); the bundle is pulled at build time from
+[`PrajnaShetty/arabic-sentiment-lora-deploy`](https://huggingface.co/PrajnaShetty/arabic-sentiment-lora-deploy)
+— see the [Deploy section](#deploy-to-hugging-face-spaces) for the recipe.
 
 A FastAPI service that classifies Arabic text — Modern Standard Arabic (MSA) and Gulf /
 Emirati dialect — as **positive**, **negative**, or **neutral**, with two interchangeable
