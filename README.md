@@ -195,34 +195,62 @@ metadata (port `7860`, sdk `docker`). The CatBoost backend, retrain
 CLI, and MLflow registry stay on the operator side — only the LoRA
 serving path ships in the container.
 
-Prerequisites — a Hugging Face account, the `huggingface_hub` CLI, and
-`git-lfs` (the LoRA adapter weights are under LFS once mirrored to
-the Space repo).
+Prerequisites — a Hugging Face account, the `huggingface_hub` CLI
+(`hf`, formerly `huggingface-cli`, renamed in `huggingface_hub` 1.x),
+and `git-lfs` for the Space repo push.
+
+### One-time setup
 
 ```bash
-# One-time
 brew install git-lfs && git lfs install
-pipx install huggingface_hub  # or: uv tool install huggingface_hub
-huggingface-cli login         # paste a "write" access token
+uv tool install huggingface_hub
+hf auth login                 # paste a "Write" access token
 
-# Create the Space (Docker SDK) — once
-huggingface-cli repo create arabic-sentiment-lora --type space --space-sdk docker
+# Create the public deploy bundle repo (holds LoRA weights, mlflow.db,
+# mlruns/ subtree). Phase 10c (ADR-0008) — the runtime image pulls this
+# at build time instead of baking from the local filesystem, so HF Spaces
+# builds don't need the 525 MB bundle in the github main repo.
+hf repos create arabic-sentiment-lora-deploy --repo-type model
 
-# Add the Space as a git remote and push from inside app/
-git -C app remote add space https://huggingface.co/spaces/<your-handle>/arabic-sentiment-lora
-git -C app push space phase-10-container-deploy:main
+# Create the Space (Docker SDK)
+hf repos create arabic-sentiment-lora --repo-type space --space-sdk docker
 ```
 
-The Space build runs `docker build` against this directory; expect
-5–8 minutes for the first build (downloads ~3 GB of layers + the
-AraBERT base into the cache-warm stage). Subsequent pushes are
-incremental.
+### Per-release: upload the bundle to HF Hub
 
-Local smoke before pushing — the same contract the Space will hit:
+Run after every retrain or whenever the deployed artifacts should change:
 
 ```bash
-docker build -t arabic-sentiment:phase10 app/
-docker run --rm -p 7860:7860 arabic-sentiment:phase10
+hf upload PrajnaShetty/arabic-sentiment-lora-deploy mlflow.db mlflow.db
+hf upload PrajnaShetty/arabic-sentiment-lora-deploy models/arabert-lora-v1 models/arabert-lora-v1
+hf upload PrajnaShetty/arabic-sentiment-lora-deploy \
+  mlruns/1/models/m-<logged-model-id> mlruns/1/models/m-<logged-model-id>
+```
+
+The `<logged-model-id>` is the `model_id` column from `mlflow.db`'s
+`logged_models` table for the version you want to ship. The bundle on
+HF Hub is the source-of-truth for what the next Space build will run.
+
+### Push the code to the Space
+
+```bash
+git -C app remote add space https://huggingface.co/spaces/<your-handle>/arabic-sentiment-lora
+git -C app push space main:main
+```
+
+The Space build runs `docker build` against the pushed git repo. The
+cache-warm stage fetches the AraBERT base (~400 MB) and the deploy
+bundle (~525 MB) from HF Hub. Expect 5–8 minutes for the first build;
+subsequent pushes are incremental.
+
+### Local smoke before pushing
+
+The same contract the Space will hit (the local build also pulls from
+HF Hub, so it tests the end-to-end resolution path):
+
+```bash
+docker build -t arabic-sentiment:phase10c app/
+docker run --rm -p 7860:7860 arabic-sentiment:phase10c
 curl -s localhost:7860/health | jq
 # {
 #   "status": "ok",
@@ -241,17 +269,16 @@ curl -s -X POST localhost:7860/predict \
 # {"text":"الفيلم كان رائعا","sentiment":"positive","confidence":0.99}
 ```
 
-**Phase 10b — registry baked.** The image bundles `mlflow.db` plus the
-single `arabert-lora` v1 logged-model subtree (~523 MB) and rewrites the
-absolute build-host paths in six MLflow tables at build time so
-`load_from_registry_or_fallback` resolves through the SQLite registry
-at startup. `/health.model_version` reflects what was actually loaded
-(the `RegistryVersionInfo` dataclass surfaced by `MLflowRegistryAdapter`).
-The image also ships a container-only `sitecustomize.py` that maps
-MPS-tagged storage to CPU during torch deserialization — the LoRA
-artifact was logged on Apple Silicon and the CPU-only Linux torch wheel
-cannot create MPS storages. See ADR-0007 Phase-10b amendment for the
-full rewrite recipe.
+**Phase 10c — pull-on-build (ADR-0008).** The runtime image fetches the
+deploy bundle from `PrajnaShetty/arabic-sentiment-lora-deploy` on HF Hub
+via `huggingface_hub.snapshot_download` during the cache-warm stage. The
+bundle layout (`models/`, `mlflow.db`, `mlruns/1/models/m-<id>/`) is
+identical to what Phase 10b baked from the local filesystem. The
+Phase-10b path-rewrite step still runs in the runtime stage (the bundle
+on HF Hub carries the original dev-host paths in `mlflow.db`), as does
+the container-only `sitecustomize.py` that maps MPS-tagged tensor
+storage to CPU during `torch.load` (the LoRA cloudpickle was logged on
+Apple Silicon).
 
 **Phase 9b retrains break the public demo until rebuild + redeploy.**
 The retrain CLI registers a new MLflow version on the operator's
