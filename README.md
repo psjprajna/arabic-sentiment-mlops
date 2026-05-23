@@ -1,6 +1,6 @@
 ---
 title: Arabic Sentiment LoRA Demo
-emoji: ⓐ
+emoji: 💬
 colorFrom: indigo
 colorTo: green
 sdk: docker
