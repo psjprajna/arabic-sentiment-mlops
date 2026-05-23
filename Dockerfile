@@ -54,6 +54,59 @@ COPY --from=cache-warm --chown=app:app /opt/hf-cache /home/app/.cache/huggingfac
 COPY --chown=app:app src/ /app/src/
 COPY --chown=app:app models/arabert-lora-v1/ /app/models/arabert-lora-v1/
 
+# Phase 10b: bake the MLflow registry so /health surfaces model_version.
+# mlflow.db holds the model_versions metadata; the logged-model subtree
+# under mlruns/1/models/m-<id>/artifacts/ holds the pyfunc bundle (MLmodel
+# manifest + nested LoRA adapter). Resolution path:
+#   models:/arabert-lora/1 -> model_versions.source (models:/m-<id>)
+#   -> logged_models.artifact_location (filesystem path)
+# logged_models.artifact_location is absolute on the build host, so we
+# rewrite it to /app/<...> in the image. SQL params are bound (?), not
+# string-concatenated, so dev-machine path characters (incl. spaces) are
+# safe. The models/arabert-lora-v1/ COPY above stays as the filesystem
+# fallback if registry resolution ever fails.
+COPY --chown=app:app mlflow.db /app/mlflow.db
+COPY --chown=app:app mlruns/1/models/m-f9cac40424504a5a91d9449f38f5bd7c/ \
+                   /app/mlruns/1/models/m-f9cac40424504a5a91d9449f38f5bd7c/
+
+RUN /opt/venv/bin/python <<'PYEOF'
+import sqlite3
+
+conn = sqlite3.connect("/app/mlflow.db")
+cur = conn.cursor()
+row = cur.execute("SELECT artifact_location FROM logged_models LIMIT 1").fetchone()
+if not row:
+    raise SystemExit("logged_models is empty; cannot bake registry")
+old_loc = row[0]
+marker = "/mlruns/"
+if marker not in old_loc:
+    raise SystemExit(f"unexpected artifact_location shape: {old_loc!r}")
+old_prefix = old_loc.split(marker, 1)[0]
+if old_prefix == "/app":
+    print(f"mlflow.db already rewritten ({old_loc}); skipping")
+else:
+    cur.execute(
+        "UPDATE logged_models SET artifact_location = REPLACE(artifact_location, ?, ?)",
+        (old_prefix, "/app"),
+    )
+    cur.execute(
+        "UPDATE runs SET artifact_uri = REPLACE(artifact_uri, ?, ?)",
+        (old_prefix, "/app"),
+    )
+    conn.commit()
+verify = cur.execute(
+    "SELECT artifact_location FROM logged_models WHERE artifact_location LIKE ? LIMIT 1",
+    (f"{old_prefix}%",),
+).fetchone()
+if verify is not None:
+    raise SystemExit(f"path rewrite failed: row still has old prefix: {verify[0]!r}")
+post = cur.execute(
+    "SELECT artifact_location FROM logged_models WHERE name='model' AND model_id='m-f9cac40424504a5a91d9449f38f5bd7c'"
+).fetchone()
+print(f"arabert-lora v1 artifact_location -> {post[0] if post else 'MISSING'}")
+conn.close()
+PYEOF
+
 ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONPATH=/app/src \
     PYTHONUNBUFFERED=1 \
@@ -61,7 +114,7 @@ ENV PATH="/opt/venv/bin:$PATH" \
     TRANSFORMERS_OFFLINE=1 \
     SENTIMENT_BACKEND=lora \
     LORA_MODEL_DIR=/app/models/arabert-lora-v1 \
-    MLFLOW_TRACKING_URI=sqlite:////tmp/mlflow-empty.db \
+    MLFLOW_TRACKING_URI=sqlite:////app/mlflow.db \
     PORT=7860
 
 USER app
