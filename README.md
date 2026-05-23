@@ -1,3 +1,13 @@
+---
+title: Arabic Sentiment LoRA Demo
+emoji: ⓐ
+colorFrom: indigo
+colorTo: green
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # Arabic Sentiment Analysis
 
 A FastAPI service that classifies Arabic text — Modern Standard Arabic (MSA) and Gulf /
@@ -176,6 +186,70 @@ The CLI is synchronous and blocks the operator's shell. A scheduled
 wrapper (slice 9b — cron / systemd / GitHub Action) is deferred until
 operator workflow demands it; the same CLI is the wrapped entrypoint.
 
+## Deploy to Hugging Face Spaces
+
+Phase 10 ships the LoRA backend as a public demo on the Spaces Docker
+SDK ($0 always-on, 16 GB RAM / 50 GB disk). The `Dockerfile` is the
+contract; the YAML frontmatter at the top of this README is the Space
+metadata (port `7860`, sdk `docker`). The CatBoost backend, retrain
+CLI, and MLflow registry stay on the operator side — only the LoRA
+serving path ships in the container.
+
+Prerequisites — a Hugging Face account, the `huggingface_hub` CLI, and
+`git-lfs` (the LoRA adapter weights are under LFS once mirrored to
+the Space repo).
+
+```bash
+# One-time
+brew install git-lfs && git lfs install
+pipx install huggingface_hub  # or: uv tool install huggingface_hub
+huggingface-cli login         # paste a "write" access token
+
+# Create the Space (Docker SDK) — once
+huggingface-cli repo create arabic-sentiment-lora --type space --space-sdk docker
+
+# Add the Space as a git remote and push from inside app/
+git -C app remote add space https://huggingface.co/spaces/<your-handle>/arabic-sentiment-lora
+git -C app push space phase-10-container-deploy:main
+```
+
+The Space build runs `docker build` against this directory; expect
+5–8 minutes for the first build (downloads ~3 GB of layers + the
+AraBERT base into the cache-warm stage). Subsequent pushes are
+incremental.
+
+Local smoke before pushing — the same contract the Space will hit:
+
+```bash
+docker build -t arabic-sentiment:phase10 app/
+docker run --rm -p 7860:7860 arabic-sentiment:phase10
+curl -s localhost:7860/health | jq
+# {"status":"ok","model":"arabert-lora-v1","model_version":null}
+
+curl -s -X POST localhost:7860/predict \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"الفيلم كان رائعا"}' | jq
+# {"text":"الفيلم كان رائعا","sentiment":"positive","confidence":0.99}
+```
+
+**Accepted regression — `/health.model_version` is `null` in-container.**
+The image does not bake `mlflow.db` or `mlruns/`; Phase 7's
+`load_from_registry_or_fallback` drops to the `LORA_MODEL_DIR`
+filesystem path on startup. Phase 6's registry-version surfacing
+returns once a baked SQLite registry is wired (future slice; see
+ADR-0007).
+
+**Phase 9b retrains break the public demo until rebuild + redeploy.**
+The retrain CLI registers a new MLflow version on the operator's
+machine; the Space still serves the baked LoRA adapter until the
+operator rebuilds the image and pushes again. The scheduler slice
+(9b) does not change this contract.
+
+**Free CPU Spaces auto-sleep** after ~48 h of no traffic; the next
+request takes ~30–60 s to wake the container. Acceptable for a
+portfolio URL; pay for an "always-on" upgrade if continuous
+availability matters.
+
 ## Status
 
 **Phase 7 — Registry-resolved serving.** The MLflow Model Registry is
@@ -344,5 +418,5 @@ Roadmap:
 - ~~**Phase 8**~~ — SQLite migration off the deprecated `file://` registry backend (`sqlite:///mlflow.db` default; ADR-0005). ✅
 - ~~**Phase 9**~~ — Auto-retraining trigger (slice 9a: manual CLI gate-and-invoke on `/metrics/drift` signals; ADR-0006). ✅
 - **Phase 9b** — Background scheduler wrapping the same CLI (deferred until operator workflow demands it).
-- **Phase 10** — Container deploy (Azure Container Apps if free-tier credits cover it at $0; Hugging Face Spaces Docker SDK otherwise).
+- ~~**Phase 10**~~ — Container deploy on Hugging Face Spaces (Docker SDK, LoRA-only, ADR-0007). Local image smoke-tested at 3 GB; `/health.model_version=null` accepted regression on the filesystem-fallback path. ✅
 - **Phase 11** — Streamlit demo + ops UI (Try-it + Behind-the-scenes tabs).
