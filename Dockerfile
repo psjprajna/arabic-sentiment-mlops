@@ -72,6 +72,17 @@ COPY --chown=app:app mlruns/1/models/m-f9cac40424504a5a91d9449f38f5bd7c/ \
 RUN /opt/venv/bin/python <<'PYEOF'
 import sqlite3
 
+# MLflow 3.x scatters absolute build-host paths across several columns; ALL
+# of them must be rewritten or the registry resolver gets handed a path that
+# doesn't exist inside the container and falls back to an empty artifact URI
+# ("MlflowException: No such artifact: ''"). Critical for resolution:
+#   - logged_models.artifact_location   (logged-model store)
+#   - model_versions.storage_location   (registry-side mirror; what
+#                                        pyfunc.load_model("models:/<name>/<v>")
+#                                        actually reads in MLflow 3.x)
+#   - runs.artifact_uri                 (run-side mirror; belt-and-braces)
+#   - experiments.artifact_location     (experiment-default; belt-and-braces)
+# Tag columns also carry the venv pytest path; harmless but swept for hygiene.
 conn = sqlite3.connect("/app/mlflow.db")
 cur = conn.cursor()
 row = cur.execute("SELECT artifact_location FROM logged_models LIMIT 1").fetchone()
@@ -85,26 +96,65 @@ old_prefix = old_loc.split(marker, 1)[0]
 if old_prefix == "/app":
     print(f"mlflow.db already rewritten ({old_loc}); skipping")
 else:
-    cur.execute(
-        "UPDATE logged_models SET artifact_location = REPLACE(artifact_location, ?, ?)",
-        (old_prefix, "/app"),
+    rewrites = (
+        ("logged_models", "artifact_location"),
+        ("model_versions", "storage_location"),
+        ("runs", "artifact_uri"),
+        ("experiments", "artifact_location"),
+        ("tags", "value"),
+        ("logged_model_tags", "tag_value"),
     )
-    cur.execute(
-        "UPDATE runs SET artifact_uri = REPLACE(artifact_uri, ?, ?)",
-        (old_prefix, "/app"),
-    )
+    for table, col in rewrites:
+        cur.execute(
+            f"UPDATE {table} SET {col} = REPLACE({col}, ?, ?) WHERE {col} LIKE ?",
+            (old_prefix, "/app", f"%{old_prefix}%"),
+        )
     conn.commit()
-verify = cur.execute(
-    "SELECT artifact_location FROM logged_models WHERE artifact_location LIKE ? LIMIT 1",
-    (f"{old_prefix}%",),
-).fetchone()
-if verify is not None:
-    raise SystemExit(f"path rewrite failed: row still has old prefix: {verify[0]!r}")
+# Confirm no residue of the old prefix remains in any critical column.
+for table, col in (
+    ("logged_models", "artifact_location"),
+    ("model_versions", "storage_location"),
+    ("runs", "artifact_uri"),
+    ("experiments", "artifact_location"),
+):
+    leftover = cur.execute(
+        f"SELECT {col} FROM {table} WHERE {col} LIKE ? LIMIT 1",
+        (f"{old_prefix}%",),
+    ).fetchone()
+    if leftover is not None:
+        raise SystemExit(f"path rewrite missed {table}.{col}: {leftover[0]!r}")
 post = cur.execute(
-    "SELECT artifact_location FROM logged_models WHERE name='model' AND model_id='m-f9cac40424504a5a91d9449f38f5bd7c'"
+    "SELECT artifact_location FROM logged_models WHERE model_id='m-f9cac40424504a5a91d9449f38f5bd7c'"
 ).fetchone()
-print(f"arabert-lora v1 artifact_location -> {post[0] if post else 'MISSING'}")
+sloc = cur.execute(
+    "SELECT storage_location FROM model_versions WHERE name='arabert-lora' AND version=1"
+).fetchone()
+print(f"arabert-lora v1 logged_models.artifact_location -> {post[0] if post else 'MISSING'}")
+print(f"arabert-lora v1 model_versions.storage_location -> {sloc[0] if sloc else 'MISSING'}")
 conn.close()
+PYEOF
+
+# Phase 10b: torch compatibility shim. The LoRA artifact baked into this
+# image was trained on Apple Silicon MPS; cloudpickle stored tensors carry
+# `location="mps"`. The CPU-only Linux torch wheel has no MPS backend, so
+# mlflow.pyfunc.load_model("models:/arabert-lora/1") crashes on storage
+# deserialization with `Storage device not recognized: mps` and the
+# container fails to start. sitecustomize.py runs at every Python startup
+# (loaded by site.py before any user code), registers a torch package
+# handler at priority 5 — checked before the default MPS handler at
+# priority 30 — and returns the already-allocated CPU storage when the
+# location starts with "mps". The file lives only in this image's
+# /opt/venv; the dev-machine venv is unaffected.
+RUN cat > /opt/venv/lib/python3.12/site-packages/sitecustomize.py <<'PYEOF'
+"""Container-only torch shim: map MPS-tagged storage to CPU at load."""
+
+import torch.serialization
+
+torch.serialization.register_package(
+    5,
+    lambda obj: None,
+    lambda storage, location: storage if location.startswith("mps") else None,
+)
 PYEOF
 
 ENV PATH="/opt/venv/bin:$PATH" \
