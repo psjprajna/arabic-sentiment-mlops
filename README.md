@@ -224,7 +224,16 @@ Local smoke before pushing — the same contract the Space will hit:
 docker build -t arabic-sentiment:phase10 app/
 docker run --rm -p 7860:7860 arabic-sentiment:phase10
 curl -s localhost:7860/health | jq
-# {"status":"ok","model":"arabert-lora-v1","model_version":null}
+# {
+#   "status": "ok",
+#   "model": "arabert-lora-v1",
+#   "model_version": {
+#     "name": "arabert-lora",
+#     "version": "1",
+#     "run_id": "94cccbd929a845dd9e47d46a5c3db759",
+#     "source": "registry"
+#   }
+# }
 
 curl -s -X POST localhost:7860/predict \
   -H 'Content-Type: application/json' \
@@ -232,12 +241,17 @@ curl -s -X POST localhost:7860/predict \
 # {"text":"الفيلم كان رائعا","sentiment":"positive","confidence":0.99}
 ```
 
-**Accepted regression — `/health.model_version` is `null` in-container.**
-The image does not bake `mlflow.db` or `mlruns/`; Phase 7's
-`load_from_registry_or_fallback` drops to the `LORA_MODEL_DIR`
-filesystem path on startup. Phase 6's registry-version surfacing
-returns once a baked SQLite registry is wired (future slice; see
-ADR-0007).
+**Phase 10b — registry baked.** The image bundles `mlflow.db` plus the
+single `arabert-lora` v1 logged-model subtree (~523 MB) and rewrites the
+absolute build-host paths in six MLflow tables at build time so
+`load_from_registry_or_fallback` resolves through the SQLite registry
+at startup. `/health.model_version` reflects what was actually loaded
+(the `RegistryVersionInfo` dataclass surfaced by `MLflowRegistryAdapter`).
+The image also ships a container-only `sitecustomize.py` that maps
+MPS-tagged storage to CPU during torch deserialization — the LoRA
+artifact was logged on Apple Silicon and the CPU-only Linux torch wheel
+cannot create MPS storages. See ADR-0007 Phase-10b amendment for the
+full rewrite recipe.
 
 **Phase 9b retrains break the public demo until rebuild + redeploy.**
 The retrain CLI registers a new MLflow version on the operator's
