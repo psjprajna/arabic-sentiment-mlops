@@ -19,7 +19,7 @@ API endpoint is at
 auto-generated Swagger UI at
 [`/docs`](https://prajnashetty-arabic-sentiment-lora.hf.space/docs).
 A friendly browser UI ships in Phase 11 (Streamlit). Served on HF Spaces' free Docker
-SDK ($0 always-on); the bundle is pulled at build time from
+SDK; the bundle is pulled at build time from
 [`PrajnaShetty/arabic-sentiment-lora-deploy`](https://huggingface.co/PrajnaShetty/arabic-sentiment-lora-deploy)
 — see the [Deploy section](#deploy-to-hugging-face-spaces) for the recipe.
 
