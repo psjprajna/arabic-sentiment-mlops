@@ -27,5 +27,7 @@ reports/*
 !reports/*.json
 !reports/*.md
 !reports/*.log
+reports/retrain-decisions.jsonl
+reports/phase-09-trigger-smoke.json
 *.arrow
 *.parquet

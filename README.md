@@ -128,6 +128,54 @@ orchestrator. The fallback path itself is opt-in by the absence of
 registry data (empty / unreachable `mlruns/`); a populated registry is
 always preferred and `/health.model_version` reports it.
 
+### Retrain on drift
+
+When `/metrics/drift` reports `drift_level: "significant"` on either
+signal AND `observed_count >= 200`, trigger a retrain via the slice-9a CLI
+(ADR-0006). The gate is pure-domain (`sentiment.domain.retrain_policy`);
+the CLI is the only seam — no scheduler, no HTTP admin endpoint.
+
+```bash
+# Snapshot the live drift state
+curl -s http://localhost:8000/metrics/drift > /tmp/drift.json
+
+# Inspect the gate decision without retraining (recommended first)
+uv run python -m sentiment.training.retrain_on_drift \
+    --backend catboost --drift-report /tmp/drift.json --dry-run
+
+# Fire the retrain (CatBoost: ~15 min wall; LoRA: ~60–90 min on MPS)
+uv run python -m sentiment.training.retrain_on_drift \
+    --backend catboost --drift-report /tmp/drift.json
+
+# Or pipe the drift report via stdin
+curl -s http://localhost:8000/metrics/drift | \
+  uv run python -m sentiment.training.retrain_on_drift \
+      --backend lora --drift-report -
+```
+
+A new model version is registered automatically when the gate fires.
+**Restart `uvicorn` to start serving it** — Phase 7's registry-resolved
+serving picks up the new version on cold-start (no in-process hot-reload).
+
+Every invocation (fire or no-op) appends one line to
+`reports/retrain-decisions.jsonl` (gitignored). Inspect with:
+
+```bash
+wc -l reports/retrain-decisions.jsonl
+tail -1 reports/retrain-decisions.jsonl | jq .
+```
+
+Override the `observed_count` floor for emergency operator action:
+
+```bash
+uv run python -m sentiment.training.retrain_on_drift \
+    --backend catboost --drift-report /tmp/drift.json --gate-min-observed 100
+```
+
+The CLI is synchronous and blocks the operator's shell. A scheduled
+wrapper (slice 9b — cron / systemd / GitHub Action) is deferred until
+operator workflow demands it; the same CLI is the wrapped entrypoint.
+
 ## Status
 
 **Phase 7 — Registry-resolved serving.** The MLflow Model Registry is
@@ -197,7 +245,7 @@ in a single file. `catboost-baseline` v1–v9 are pre-retrain pollution;
 v10 is the Step-2 production retrain; v11 is a diagnostic registration
 created during investigation. DESC resolution defaults to v11 — set
 `MODEL_VERSION=10` for production-grade serving. Full root cause in
-`.claude/tasks/lessons.md` 2026-05-22 | testing.
+workspace `tasks/lessons.md` 2026-05-22 | testing.
 
 **Phase 6 — MLflow Model Registry versioning.** Every retrain of either
 backend registers a new version into the local Model Registry
@@ -294,6 +342,7 @@ Roadmap:
 - ~~**Phase 6**~~ — MLflow Model Registry versioning; `/health` surfaces `model_version`; carry-forward of Phase-4/5 fields across retrains. ✅
 - ~~**Phase 7**~~ — Registry-resolved serving (load via `models:/<name>/<version>`); `MODEL_VERSION` env var; filesystem fallback for offline dev; `/health.model_version` reflects what is loaded. ✅
 - ~~**Phase 8**~~ — SQLite migration off the deprecated `file://` registry backend (`sqlite:///mlflow.db` default; ADR-0005). ✅
-- **Phase 9** — Auto-retraining trigger on PSI drift signals.
+- ~~**Phase 9**~~ — Auto-retraining trigger (slice 9a: manual CLI gate-and-invoke on `/metrics/drift` signals; ADR-0006). ✅
+- **Phase 9b** — Background scheduler wrapping the same CLI (deferred until operator workflow demands it).
 - **Phase 10** — Container deploy (Azure Container Apps if free-tier credits cover it at $0; Hugging Face Spaces Docker SDK otherwise).
 - **Phase 11** — Streamlit demo + ops UI (Try-it + Behind-the-scenes tabs).
