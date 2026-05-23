@@ -9,14 +9,22 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-ml = [
+ml-runtime = [
+    "mlflow>=2.14",
     "transformers>=4.40",
+    "torch>=2.3",
+    "peft>=0.11",
+    "pandas>=2.0",
+]
+ml = [
+    "mlflow>=2.14",
+    "transformers>=4.40",
+    "torch>=2.3",
+    "peft>=0.11",
+    "pandas>=2.0",
     "catboost>=1.2",
     "scikit-learn>=1.5",
-    "mlflow>=2.14",
-    "torch>=2.3",
     "datasets>=2.18",
-    "peft>=0.11",
     "accelerate>=0.30",
     "evaluate>=0.4",
 ]
