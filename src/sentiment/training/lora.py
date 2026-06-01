@@ -34,8 +34,11 @@ from transformers import (
     TrainingArguments,
 )
 
+from sentiment.adapters.gulf_to_msa_normalizer import GulfToMSANormalizer
 from sentiment.adapters.hard_dataset import DatasetSplits, Example, HARDDataset
+from sentiment.domain.dialect import Dialect, classify_dialect
 from sentiment.domain.models import Sentiment
+from sentiment.domain.normalizer import TextNormalizerPort
 from sentiment.training.dialect_breakdown import compute_dialect_breakdown
 from sentiment.training.mlflow_logging import (
     SentimentPyfunc,
@@ -75,6 +78,23 @@ def _pick_device() -> str:
     if torch.backends.mps.is_available():
         return "mps"
     return "cpu"
+
+
+def _augment_train_with_normalizer(
+    examples: Sequence[Example],
+    normalizer: TextNormalizerPort,
+) -> list[Example]:
+    """Append a normalized copy of every Gulf-tagged example.
+
+    Dev/test splits are not touched anywhere — dialect_breakdown still
+    measures real Gulf input, so any F1 lift on the gulf bucket is a clean
+    signal from the augmentation rather than from substitution at eval time.
+    """
+    augmented = list(examples)
+    for ex in examples:
+        if classify_dialect(ex.text) is Dialect.GULF:
+            augmented.append(Example(text=normalizer.normalize(ex.text), sentiment=ex.sentiment))
+    return augmented
 
 
 def _stratified_subsample(examples: Sequence[Example], n: int, seed: int) -> list[Example]:
@@ -213,10 +233,14 @@ def run_lora_training(
     baseline_report_path: Path = _DEFAULT_BASELINE_REPORT,
     mlflow_tracking_uri: str = _DEFAULT_TRACKING_URI,
     seed: int = 42,
+    normalizer: TextNormalizerPort | None = None,
 ) -> dict[str, object]:
     device = _pick_device()
     n_train_full = len(splits.train)
     train_examples = _stratified_subsample(splits.train, n_train_subsample, seed)
+    n_train_pre_aug = len(train_examples)
+    if normalizer is not None:
+        train_examples = _augment_train_with_normalizer(train_examples, normalizer)
     effective_subsample = len(train_examples)
 
     tokenizer = AutoTokenizer.from_pretrained(base_model)
@@ -341,6 +365,9 @@ def run_lora_training(
         "device": device,
         "baseline_f1_macro": baseline if baseline is not None else "null",
     }
+    if normalizer is not None:
+        params["transliterate_gulf"] = True
+        params["n_train_original"] = n_train_pre_aug
     metrics: dict[str, float] = {
         "f1_macro": macro,
         **{f"f1_{cls}": val for cls, val in per_class.items()},
@@ -381,12 +408,18 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument("--n-train-subsample", type=int, default=_DEFAULT_N_TRAIN_SUBSAMPLE)
     parser.add_argument("--mlflow-uri", type=str, default=_DEFAULT_TRACKING_URI)
     parser.add_argument("--base-model", type=str, default=_BASE_MODEL)
+    parser.add_argument(
+        "--transliterate-gulf",
+        action="store_true",
+        help="Augment train split with Gulf->MSA transliterated copies of Gulf-tagged rows.",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
     splits = HARDDataset(source=args.source, seed=args.seed).load()
+    normalizer = GulfToMSANormalizer() if args.transliterate_gulf else None
     report = run_lora_training(
         splits=splits,
         model_dir=args.model_dir,
@@ -395,6 +428,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         n_train_subsample=args.n_train_subsample,
         mlflow_tracking_uri=args.mlflow_uri,
         seed=args.seed,
+        normalizer=normalizer,
     )
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0
