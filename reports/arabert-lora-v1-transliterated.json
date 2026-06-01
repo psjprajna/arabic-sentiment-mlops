@@ -1,0 +1,121 @@
+{
+  "model": "arabert-lora-v1",
+  "base_model": "aubmindlab/bert-base-arabertv2",
+  "dataset": "HARD",
+  "split_sizes": {
+    "train_full": 327649,
+    "train_subsample": 30287,
+    "dev": 40956,
+    "test": 40957
+  },
+  "lora": {
+    "rank": 8,
+    "alpha": 16,
+    "dropout": 0.1,
+    "target_modules": [
+      "query",
+      "value"
+    ]
+  },
+  "training": {
+    "epochs": 3,
+    "batch_size": 16,
+    "learning_rate": 0.0002,
+    "max_length": 128,
+    "seed": 42
+  },
+  "f1_per_class": {
+    "positive": 0.9444874138658417,
+    "negative": 0.8262593058106932,
+    "neutral": 0.7337737519580467
+  },
+  "f1_macro": 0.8348401572115272,
+  "confusion_matrix": [
+    [
+      26865,
+      121,
+      653
+    ],
+    [
+      402,
+      4273,
+      610
+    ],
+    [
+      1982,
+      664,
+      5387
+    ]
+  ],
+  "label_order": [
+    "positive",
+    "negative",
+    "neutral"
+  ],
+  "baseline_f1_macro": 0.7647626209192161,
+  "delta_vs_baseline": 0.07007753629231106,
+  "trained_at": "2026-06-01T15:30:30.595473+00:00",
+  "dialect_breakdown": {
+    "tagger": "lexicon-v1",
+    "gulf": {
+      "n": 420,
+      "f1_per_class": {
+        "positive": 0.8855291576673866,
+        "negative": 0.783625730994152,
+        "neutral": 0.6407766990291263
+      },
+      "f1_macro": 0.7699771958968883,
+      "confusion_matrix": [
+        [
+          205,
+          4,
+          12
+        ],
+        [
+          4,
+          67,
+          17
+        ],
+        [
+          33,
+          12,
+          66
+        ]
+      ]
+    },
+    "msa": {
+      "n": 40537,
+      "f1_per_class": {
+        "positive": 0.9449712007089056,
+        "negative": 0.8269760125835627,
+        "neutral": 0.7350970504938868
+      },
+      "f1_macro": 0.8356814212621183,
+      "confusion_matrix": [
+        [
+          26660,
+          117,
+          641
+        ],
+        [
+          398,
+          4206,
+          593
+        ],
+        [
+          1949,
+          652,
+          5321
+        ]
+      ]
+    },
+    "gulf_share": 0.01025465732353444
+  },
+  "registry": {
+    "name": "arabert-lora",
+    "version": "1",
+    "run_id": "ff556038567f4a7e8043ec1c5d6b4a18",
+    "model_uri": "runs:/ff556038567f4a7e8043ec1c5d6b4a18/model",
+    "registered_at": "2026-06-01T15:30:36.859856+00:00"
+  }
+}
