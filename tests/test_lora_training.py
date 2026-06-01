@@ -15,8 +15,9 @@ from typing import Any
 import numpy as np
 import pytest
 
-from sentiment.adapters.hard_dataset import HARDDataset
+from sentiment.adapters.hard_dataset import Example, HARDDataset
 from sentiment.domain.models import Sentiment
+from sentiment.domain.normalizer import TextNormalizerPort
 
 
 class _StubTokenizer:
@@ -415,3 +416,110 @@ def test_lora_report_artifact_attached_to_mlflow_run(
     # run_id comes from the fake log_run's stub return — proves the
     # attach call ran after log_run resolved and used its run_id.
     assert attached[0]["run_id"] == "stub-run-1"
+
+
+# ---------------------------------------------------------------------------
+# Phase 11b — Gulf->MSA train-side augmentation on the LoRA backend
+# ---------------------------------------------------------------------------
+
+
+class _SentinelNormalizer(TextNormalizerPort):
+    """Returns a recognizable sentinel — proves augmented rows reach the trainer."""
+
+    SENTINEL = "zzzsentinelzzz"
+
+    def normalize(self, text: str) -> str:
+        return self.SENTINEL
+
+
+def _synthetic_rows_with_gulf(n_per_class: int = 20) -> list[tuple[str, int]]:
+    """Same shape as _synthetic_rows but positive class carries Gulf markers."""
+    rows: list[tuple[str, int]] = []
+    for i in range(n_per_class):
+        rows.append((f"شلون الفندق وايد زين رائع ممتاز جدا {i}", 5))
+        rows.append((f"سيء جدا قذر مزعج فظيع غير محترم {i}", 1))
+        rows.append((f"عادي مقبول لا بأس متوسط لا أكثر {i}", 3))
+    return rows
+
+
+def test_augment_train_with_normalizer_appends_only_gulf_rows() -> None:
+    from sentiment.training.lora import _augment_train_with_normalizer
+
+    examples = [
+        Example(text="شلون الفندق", sentiment=Sentiment.POSITIVE),
+        Example(text="الفندق نظيف", sentiment=Sentiment.POSITIVE),
+        Example(text="وايد زين", sentiment=Sentiment.POSITIVE),
+    ]
+    out = _augment_train_with_normalizer(examples, _SentinelNormalizer())
+    # Original 3 + 2 augmented copies (only the Gulf-tagged rows).
+    assert len(out) == 5
+    assert out[:3] == examples
+    assert all(ex.text == _SentinelNormalizer.SENTINEL for ex in out[3:])
+    assert all(ex.sentiment is Sentiment.POSITIVE for ex in out[3:])
+
+
+def test_run_lora_augmentation_reaches_trainer_input(
+    tmp_path: Path, _patched: dict[str, Any]
+) -> None:
+    from sentiment.training.lora import run_lora_training
+
+    splits = HARDDataset.from_rows(_synthetic_rows_with_gulf(20), seed=42)
+    n_train_pre_aug = min(len(splits.train), 30)
+
+    run_lora_training(
+        splits=splits,
+        model_dir=tmp_path / "lora",
+        report_path=tmp_path / "lora-report.json",
+        n_train_subsample=30,
+        mlflow_tracking_uri=f"sqlite:///{tmp_path}/mlflow.db",
+        normalizer=_SentinelNormalizer(),
+    )
+
+    train_ds = _StubTrainer.last_kwargs["train_dataset"]
+    # Augmented rows must show up in the dataset handed to Trainer.
+    assert _SentinelNormalizer.SENTINEL in train_ds["text"]
+    # Augmentation grew the trainer's train split beyond the pre-aug subsample.
+    assert len(train_ds) > n_train_pre_aug
+
+
+def test_run_lora_logs_transliterate_gulf_param_when_normalizer_passed(
+    tmp_path: Path, _patched: dict[str, Any]
+) -> None:
+    from sentiment.training.lora import run_lora_training
+
+    splits = HARDDataset.from_rows(_synthetic_rows_with_gulf(20), seed=42)
+
+    run_lora_training(
+        splits=splits,
+        model_dir=tmp_path / "lora",
+        report_path=tmp_path / "lora-report.json",
+        n_train_subsample=30,
+        mlflow_tracking_uri=f"sqlite:///{tmp_path}/mlflow.db",
+        normalizer=_SentinelNormalizer(),
+    )
+
+    call = _patched["captured_log"][0]
+    params = call["params"]
+    assert params["transliterate_gulf"] is True
+    assert "n_train_original" in params
+    assert params["n_train_subsample"] > params["n_train_original"]
+
+
+def test_run_lora_default_path_omits_transliterate_gulf_param(
+    tmp_path: Path, _patched: dict[str, Any]
+) -> None:
+    from sentiment.training.lora import run_lora_training
+
+    splits = HARDDataset.from_rows(_synthetic_rows(20), seed=42)
+
+    run_lora_training(
+        splits=splits,
+        model_dir=tmp_path / "lora",
+        report_path=tmp_path / "lora-report.json",
+        n_train_subsample=30,
+        mlflow_tracking_uri=f"sqlite:///{tmp_path}/mlflow.db",
+    )
+
+    params = _patched["captured_log"][0]["params"]
+    assert "transliterate_gulf" not in params
+    assert "n_train_original" not in params
