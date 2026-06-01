@@ -26,8 +26,11 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics import confusion_matrix, f1_score
 
 from sentiment.adapters.catboost_classifier import _normalize
+from sentiment.adapters.gulf_to_msa_normalizer import GulfToMSANormalizer
 from sentiment.adapters.hard_dataset import DatasetSplits, Example, HARDDataset
+from sentiment.domain.dialect import Dialect, classify_dialect
 from sentiment.domain.models import Sentiment
+from sentiment.domain.normalizer import TextNormalizerPort
 from sentiment.training.dialect_breakdown import compute_dialect_breakdown
 from sentiment.training.mlflow_logging import (
     SentimentPyfunc,
@@ -53,6 +56,23 @@ def _texts_and_labels(examples: Sequence[Example]) -> tuple[list[str], np.ndarra
     label_to_idx = {s: i for i, s in enumerate(_LABEL_ORDER)}
     y = np.array([label_to_idx[ex.sentiment] for ex in examples], dtype=np.int64)
     return texts, y
+
+
+def _augment_train_with_normalizer(
+    examples: Sequence[Example],
+    normalizer: TextNormalizerPort,
+) -> list[Example]:
+    """Append a normalized copy of every Gulf-tagged example.
+
+    Dev/test splits are not touched anywhere — dialect_breakdown still
+    measures real Gulf input, so any F1 lift on the gulf bucket is a clean
+    signal from the augmentation rather than from substitution at eval time.
+    """
+    augmented = list(examples)
+    for ex in examples:
+        if classify_dialect(ex.text) is Dialect.GULF:
+            augmented.append(Example(text=normalizer.normalize(ex.text), sentiment=ex.sentiment))
+    return augmented
 
 
 def _fit_vectorizer(texts: Sequence[str]) -> TfidfVectorizer:
@@ -158,8 +178,14 @@ def run_baseline(
     model_dir: Path,
     report_path: Path,
     mlflow_tracking_uri: str = _DEFAULT_TRACKING_URI,
+    normalizer: TextNormalizerPort | None = None,
 ) -> dict[str, object]:
-    train_texts, y_train = _texts_and_labels(splits.train)
+    train_examples = (
+        _augment_train_with_normalizer(splits.train, normalizer)
+        if normalizer is not None
+        else list(splits.train)
+    )
+    train_texts, y_train = _texts_and_labels(train_examples)
     dev_texts, y_dev = _texts_and_labels(splits.dev)
     test_texts, y_test = _texts_and_labels(splits.test)
 
@@ -211,10 +237,13 @@ def run_baseline(
         "eval_metric": "MultiClass",
         "auto_class_weights": "Balanced",
         "random_seed": _RANDOM_SEED,
-        "n_train": len(splits.train),
+        "n_train": len(train_examples),
         "n_dev": len(splits.dev),
         "n_test": len(splits.test),
     }
+    if normalizer is not None:
+        params["transliterate_gulf"] = True
+        params["n_train_original"] = len(splits.train)
     metrics: dict[str, float] = {
         "f1_macro": macro,
         **{f"f1_{cls}": val for cls, val in per_class.items()},
@@ -251,17 +280,24 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument("--source", type=str, default="default")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--mlflow-uri", type=str, default=_DEFAULT_TRACKING_URI)
+    parser.add_argument(
+        "--transliterate-gulf",
+        action="store_true",
+        help="Augment train split with Gulf->MSA transliterated copies of Gulf-tagged rows.",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
     splits = HARDDataset(source=args.source, seed=args.seed).load()
+    normalizer = GulfToMSANormalizer() if args.transliterate_gulf else None
     report = run_baseline(
         splits=splits,
         model_dir=args.model_dir,
         report_path=args.report_path,
         mlflow_tracking_uri=args.mlflow_uri,
+        normalizer=normalizer,
     )
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0

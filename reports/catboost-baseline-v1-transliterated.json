@@ -1,0 +1,101 @@
+{
+  "model": "catboost-baseline-v1",
+  "dataset": "HARD",
+  "split_sizes": {
+    "train": 327649,
+    "dev": 40956,
+    "test": 40957
+  },
+  "f1_per_class": {
+    "positive": 0.9014295057460525,
+    "negative": 0.7155110220440882,
+    "neutral": 0.6738256719417232
+  },
+  "f1_macro": 0.7635887332439547,
+  "confusion_matrix": [
+    [
+      24120,
+      1445,
+      2074
+    ],
+    [
+      370,
+      4463,
+      452
+    ],
+    [
+      1386,
+      1282,
+      5365
+    ]
+  ],
+  "label_order": [
+    "positive",
+    "negative",
+    "neutral"
+  ],
+  "trained_at": "2026-06-01T09:43:56.837089+00:00",
+  "dialect_breakdown": {
+    "tagger": "lexicon-v1",
+    "gulf": {
+      "n": 420,
+      "f1_per_class": {
+        "positive": 0.8171021377672208,
+        "negative": 0.6936936936936937,
+        "neutral": 0.5786802030456852
+      },
+      "f1_macro": 0.6964920115021999,
+      "confusion_matrix": [
+        [
+          172,
+          26,
+          23
+        ],
+        [
+          5,
+          77,
+          6
+        ],
+        [
+          23,
+          31,
+          57
+        ]
+      ]
+    },
+    "msa": {
+      "n": 40537,
+      "f1_per_class": {
+        "positive": 0.9020981655177609,
+        "negative": 0.7159063086591039,
+        "neutral": 0.6750174858523558
+      },
+      "f1_macro": 0.7643406533430736,
+      "confusion_matrix": [
+        [
+          23948,
+          1419,
+          2051
+        ],
+        [
+          365,
+          4386,
+          446
+        ],
+        [
+          1363,
+          1251,
+          5308
+        ]
+      ]
+    },
+    "gulf_share": 0.01025465732353444
+  },
+  "registry": {
+    "name": "catboost-baseline",
+    "version": "1",
+    "run_id": "3338a919efa54da9908c54284232dec9",
+    "model_uri": "runs:/3338a919efa54da9908c54284232dec9/model",
+    "registered_at": "2026-06-01T09:44:00.332066+00:00"
+  }
+}
