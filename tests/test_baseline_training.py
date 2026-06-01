@@ -5,10 +5,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import joblib
 from mlflow.tracking import MlflowClient
 
-from sentiment.adapters.hard_dataset import HARDDataset
-from sentiment.training.baseline import run_baseline
+from sentiment.adapters.hard_dataset import Example, HARDDataset
+from sentiment.domain.models import Sentiment
+from sentiment.domain.normalizer import TextNormalizerPort
+from sentiment.training.baseline import _augment_train_with_normalizer, run_baseline
 
 
 def _synthetic_rows(n_per_class: int = 20) -> list[tuple[str, int]]:
@@ -181,3 +184,102 @@ def test_baseline_report_artifact_attached_to_mlflow_run(tmp_path: Path) -> None
     client = MlflowClient(tracking_uri=uri)
     artifact_names = {a.path for a in client.list_artifacts(run_id)}
     assert report_path.name in artifact_names
+
+
+# ---------------------------------------------------------------------------
+# Phase 11 — Gulf->MSA train-side augmentation
+# ---------------------------------------------------------------------------
+
+
+class _SentinelNormalizer(TextNormalizerPort):
+    """Returns a recognizable sentinel — proves the augmented row reaches fit()."""
+
+    SENTINEL = "zzzsentinelzzz"
+
+    def normalize(self, text: str) -> str:
+        return self.SENTINEL
+
+
+def _synthetic_rows_with_gulf(n_per_class: int = 20) -> list[tuple[str, int]]:
+    """Same shape as _synthetic_rows but positive class carries Gulf markers."""
+    rows: list[tuple[str, int]] = []
+    for i in range(n_per_class):
+        rows.append((f"شلون الفندق وايد زين رائع ممتاز جدا {i}", 5))
+        rows.append((f"سيء جدا قذر مزعج فظيع غير محترم {i}", 1))
+        rows.append((f"عادي مقبول لا بأس متوسط لا أكثر {i}", 3))
+    return rows
+
+
+def test_augment_train_with_normalizer_appends_only_gulf_rows() -> None:
+    examples = [
+        Example(text="شلون الفندق", sentiment=Sentiment.POSITIVE),
+        Example(text="الفندق نظيف", sentiment=Sentiment.POSITIVE),
+        Example(text="وايد زين", sentiment=Sentiment.POSITIVE),
+    ]
+    out = _augment_train_with_normalizer(examples, _SentinelNormalizer())
+    # Original 3 + 2 augmented copies (only the Gulf-tagged rows).
+    assert len(out) == 5
+    assert out[:3] == examples
+    assert all(ex.text == _SentinelNormalizer.SENTINEL for ex in out[3:])
+    assert all(ex.sentiment is Sentiment.POSITIVE for ex in out[3:])
+
+
+def test_run_baseline_augmentation_reaches_fitted_vocabulary(tmp_path: Path) -> None:
+    splits = HARDDataset.from_rows(_synthetic_rows_with_gulf(20), seed=42)
+    model_dir = tmp_path / "m"
+    report_path = tmp_path / "r.json"
+
+    run_baseline(
+        splits=splits,
+        model_dir=model_dir,
+        report_path=report_path,
+        mlflow_tracking_uri=_tracking_uri(tmp_path),
+        normalizer=_SentinelNormalizer(),
+    )
+
+    vec = joblib.load(model_dir / "vectorizer.joblib")
+    assert _SentinelNormalizer.SENTINEL in vec.vocabulary_
+
+
+def test_run_baseline_logs_transliterate_gulf_param_when_normalizer_passed(
+    tmp_path: Path,
+) -> None:
+    splits = HARDDataset.from_rows(_synthetic_rows_with_gulf(20), seed=42)
+    uri = _tracking_uri(tmp_path)
+
+    run_baseline(
+        splits=splits,
+        model_dir=tmp_path / "m",
+        report_path=tmp_path / "r.json",
+        mlflow_tracking_uri=uri,
+        normalizer=_SentinelNormalizer(),
+    )
+
+    client = MlflowClient(tracking_uri=uri)
+    experiment = client.get_experiment_by_name("arabic-sentiment")
+    assert experiment is not None
+    runs = client.search_runs(experiment_ids=[experiment.experiment_id])
+    assert len(runs) == 1
+    params = runs[0].data.params
+    assert params.get("transliterate_gulf") == "True"
+    assert "n_train_original" in params
+    assert int(params["n_train"]) > int(params["n_train_original"])
+
+
+def test_run_baseline_default_path_omits_transliterate_gulf_param(tmp_path: Path) -> None:
+    splits = HARDDataset.from_rows(_synthetic_rows(20), seed=42)
+    uri = _tracking_uri(tmp_path)
+
+    run_baseline(
+        splits=splits,
+        model_dir=tmp_path / "m",
+        report_path=tmp_path / "r.json",
+        mlflow_tracking_uri=uri,
+    )
+
+    client = MlflowClient(tracking_uri=uri)
+    experiment = client.get_experiment_by_name("arabic-sentiment")
+    assert experiment is not None
+    params = client.search_runs(experiment_ids=[experiment.experiment_id])[0].data.params
+    assert "transliterate_gulf" not in params
+    assert "n_train_original" not in params
